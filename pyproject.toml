@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "in_sight"
+version = "0.0.1"
+description = "In-Sight is a tool for analyzing and visualizing genomic data."
+authors = ["Yonghe Xia <xiayh17@gmail.com>"]
+readme = "README.md"
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pysam = "^0.22.1"
+requests = "^2.32.3"
+pandas = "^2.2.2"
+networkx = "^3.3"
+duckdb = "^1.1.0"
+rpy2 = "^3.5.16"
+scipy = "^1.14.1"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

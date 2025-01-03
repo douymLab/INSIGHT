@@ -1,0 +1,26 @@
+#  Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.tar.lzma
+*.tar.lz4
+*.tar.zst
+*.tar.lz
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+*.ipynb
+*.__pycache__/
+*.DS_Store
+*.RData
+*.Rhistory
+*.svg
+*.csv
+
