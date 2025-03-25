@@ -333,6 +333,7 @@ class CombinedReadManager:
         self.max_region_end = max(region.end for region in regions)
         self.layout_manager = LayoutManager()
         self.sampler = sampler
+        self.sampler_info = None  # 添加存储采样统计信息的属性
         
         self.filter_tags = {}
         if filter_tags:
@@ -695,6 +696,9 @@ class CombinedReadManager:
             
             # 使用sampler进行采样
             result = self.sampler.sample(all_candidates)
+            
+            # 保存采样统计信息
+            self.sampler_info = result.stats
             
             # 处理采样结果
             for idx in result.selected_indices:

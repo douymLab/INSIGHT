@@ -244,13 +244,18 @@ def base_visualization(bam_path: str,
     
     manager.process_reads()
     manager.sort_reads('start')
+    print(f"align_samples: {align_samples}")
     if align_samples:
+        print(f"align_samples: {align_samples}")
         ref_start = min(r[0] for r in parsed_regions) - 150
         ref_end = max(r[1] for r in parsed_regions) + 150
+        print(f"ref_start: {ref_start}, ref_end: {ref_end}")
     else:
         ref_start = None
         ref_end = None
     read_df, base_df, reference_df = manager.generate_dataframes(ref_start=ref_start, ref_end=ref_end)
+    
+    sampler_info = manager.sampler_info
     
     # 生成输出路径
     file_paths = None
@@ -312,7 +317,5 @@ def base_visualization(bam_path: str,
     
     return {
         'file_paths': file_paths,
-        'read_df': read_df,
-        'base_df': base_df,
-        'reference_df': reference_df
+        'sampler_info': sampler_info
     }
