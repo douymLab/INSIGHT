@@ -1,13 +1,17 @@
 import pysam
 import networkx as nx
 import pandas as pd
-from typing import List, Dict, Callable, Tuple, Any, Optional
+from typing import List, Dict, Callable, Tuple, Any, Optional, Union, Iterable
 from dataclasses import dataclass, field
 from collections import defaultdict
 from .reads_import import EnhancedRead, AlignState
 from .reads_type import ReadInfo, ReadType
+from .utils import adjust_chromosome_name
+from .samplers import BaseSampler, UniformSampler, MutationBasedSampler
 from functools import cmp_to_key
 from pathlib import Path
+import random
+import numpy as np
 
 class Region:
     def __init__(self, start: int, end: int, region_type: str):
@@ -315,7 +319,9 @@ def determine_file_type(filename):
 
 
 class CombinedReadManager:
-    def __init__(self, alignment_filename: str, chromosome: str, regions: List[Region], reference_filename: str = None):
+    def __init__(self, alignment_filename: str, chromosome: str, regions: List[Region], reference_filename: str = None, 
+                 filter_tags: Dict[str, Union[str, Iterable]] = None, 
+                 sampler: BaseSampler = None):
         self.alignment_filename = alignment_filename
         self.chromosome = chromosome
         self.reference_filename = reference_filename
@@ -326,6 +332,17 @@ class CombinedReadManager:
         self.min_region_start = min(region.start for region in regions)
         self.max_region_end = max(region.end for region in regions)
         self.layout_manager = LayoutManager()
+        self.sampler = sampler
+        
+        self.filter_tags = {}
+        if filter_tags:
+            for tag, values in filter_tags.items():
+                if isinstance(values, str) or not isinstance(values, Iterable):
+                    values = {str(values)}
+                else:
+                    values = set(map(str, values))
+                self.filter_tags[tag] = values
+        self.skipped_reads = 0
 
     def process_reads(self):
         self._load_reads()
@@ -346,17 +363,11 @@ class CombinedReadManager:
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
         
-        with pysam.AlignmentFile(self.alignment_filename, mode, reference_filename=self.reference_filename) as alignment_file:
-            for region in self.regions:
-                for aligned_segment in alignment_file.fetch(self.chromosome, start=region.start, end=region.end):
-                    if aligned_segment.is_unmapped:
-                        continue
-                    unique_key = f"{aligned_segment.query_name}_{aligned_segment.reference_start}"
-                    if unique_key not in self.reads:
-                        read_info = self._create_read_info(aligned_segment)
-                        self.reads[unique_key] = read_info
-                        if read_info.has_type(ReadType.LOCALPAIRED):
-                            self.localpaired_reads.setdefault(read_info.query_name, []).append(read_info)
+        # 是否需要降采样
+        if self.sampler is not None:
+            self._load_with_downsampling(mode)
+        else:
+            self._load_without_downsampling(mode)
 
     def _create_read_info(self, aligned_segment: pysam.AlignedSegment) -> CombinedReadInfo:
         read_type = self._determine_read_type(aligned_segment)
@@ -409,6 +420,9 @@ class CombinedReadManager:
     def _get_sort_key(self, y_level: YLevel, key: str) -> Any:
         if key == 'start':
             return y_level.xmin
+        # if key == 'reference_start':
+            
+        #     return y_level.reads[0].reference_start
         elif key == 'end':
             return y_level.xmax
         elif key == 'has_localpaired':
@@ -449,11 +463,130 @@ class CombinedReadManager:
     def compact_layout(self):
         self.layout_manager.compact_layout()
 
-    def generate_dataframes(self):
+    def generate_dataframes(self, padding: int = 10, ref_start: int = None, ref_end: int = None):
+        """
+        Generate dataframes
+        
+        Parameters:
+            padding: int - Number of positions to extend on both sides when auto-calculating reference range
+            ref_start: int - Optional, manually specify reference start position
+            ref_end: int - Optional, manually specify reference end position
+        
+        Returns:
+            Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] - (read_df, base_df, reference_df)
+        """
         read_data = [self._extract_read_info(read) for read in self.reads.values()]
         base_data = [base_info for read in self.reads.values() for base_info in self._extract_base_info(read)]
-
-        return pd.DataFrame(read_data), pd.DataFrame(base_data)
+        
+        # Create empty dataframes
+        read_df = pd.DataFrame(read_data) if read_data else pd.DataFrame()
+        base_df = pd.DataFrame(base_data) if base_data else pd.DataFrame()
+        
+        # Generate reference sequence dataframe
+        reference_df = self._generate_reference_dataframe(padding=padding, start=ref_start, end=ref_end, 
+                                                         empty_reads=(not read_data or not base_data))
+        
+        return read_df, base_df, reference_df
+    
+    def _generate_reference_dataframe(self, padding: int = 10, start: int = None, end: int = None, empty_reads: bool = False):
+        """
+        Generate reference sequence DataFrame
+        
+        Parameters:
+            padding: int - Number of positions to extend on both sides when auto-calculating range
+            start: int - Optional, manually specify start position, ignores auto-calculation and padding if specified
+            end: int - Optional, manually specify end position, ignores auto-calculation and padding if specified
+            empty_reads: bool - Indicates if read_data or base_data is empty
+        
+        Returns:
+            pandas.DataFrame - Reference sequence DataFrame
+        """
+        # Determine display range
+        if start is not None and end is not None:
+            # Use manually specified range
+            display_range = (start, end)
+        else:
+            # Auto-calculate range
+            if not self.reads:
+                if not empty_reads or (start is None and end is None):
+                    # No data available to infer reference range
+                    if start is not None:
+                        display_range = (start, start + 100)  # Default show 100 positions
+                    elif end is not None:
+                        display_range = (max(0, end - 100), end)  # Default show 100 positions
+                    else:
+                        return pd.DataFrame()  # Not enough information to generate reference sequence
+                else:
+                    # Use known values from start and end to determine range
+                    if start is None:
+                        start = max(0, end - 100)
+                    if end is None:
+                        end = start + 100
+                    display_range = (start, end)
+            else:
+                # Have reads data, calculate range normally
+                min_pos = min(read.xmin for read in self.reads.values() if read.xmin is not None)
+                max_pos = max(read.xmax for read in self.reads.values() if read.xmax is not None)
+                
+                # Check if there's a valid position range
+                if min_pos == float('inf') or max_pos == float('-inf'):
+                    if start is not None or end is not None:
+                        # Use known values from start and end
+                        if start is None:
+                            start = max(0, end - 100)
+                        if end is None:
+                            end = start + 100
+                        display_range = (start, end)
+                    else:
+                        return pd.DataFrame()  # Not enough information to generate reference sequence
+                else:
+                    # Add padding (extension space)
+                    min_pos = max(0, int(min_pos) - padding)  # Ensure not less than 0
+                    max_pos = int(max_pos) + padding
+                    
+                    # If start or end was manually specified, apply those values
+                    if start is not None:
+                        min_pos = start
+                    if end is not None:
+                        max_pos = end
+                    
+                    display_range = (min_pos, max_pos)
+        
+        # Calculate sequence length
+        seq_len = display_range[1] - display_range[0] + 1
+        
+        # Get reference sequence or create N-filled sequence
+        if self.reference_filename:
+            try:
+                with pysam.FastaFile(self.reference_filename) as ref:
+                    # Adjust the chromosome name if needed
+                    chrom = adjust_chromosome_name(self.reference_filename, self.chromosome)
+                    # Chromosome name format can be adjusted here if needed
+                    reference_sequence = ref.fetch(chrom, display_range[0], display_range[1] + 1).upper()
+            except Exception as e:
+                print(f"Unable to retrieve reference sequence: {e}")
+                # Create N-filled sequence
+                reference_sequence = 'N' * seq_len
+        else:
+            # No reference sequence file provided, use N-filling
+            print("Warning: No reference filename provided. Using 'N' filled reference sequence.")
+            reference_sequence = 'N' * seq_len
+        
+        # Create reference sequence DataFrame
+        reference_df = pd.DataFrame({
+            'read_id': ['reference_read'] * seq_len,
+            'base': list(reference_sequence),
+            'query_pos': range(1, seq_len + 1),
+            'ref_pos': range(display_range[0], display_range[1] + 1),
+            'base_quality': [60] * seq_len,  # Default quality 60 for reference sequence
+            'align_state_value': [0] * seq_len,
+            'align_state': ['REF'] * seq_len,
+            'x': range(1, seq_len + 1),
+            'y': [-2] * seq_len,  # Reference sequence at y=-2
+            'visual_x': range(display_range[0], display_range[1] + 1),
+        })
+        
+        return reference_df
 
     def _extract_read_info(self, read: CombinedReadInfo) -> dict:
         read_info = {
@@ -518,6 +651,103 @@ class CombinedReadManager:
 
         return pd.DataFrame(y_level_data)
 
-def create_combined_read_manager(bam_file: str, chromosome: str, regions: List[Tuple[int, int, str]], reference_filename: str = None) -> CombinedReadManager:
+    def _load_with_downsampling(self, mode):
+        """使用sampler进行降采样"""
+        if self.sampler is None:
+            raise ValueError("Sampler is required for downsampling")
+            
+        with pysam.AlignmentFile(self.alignment_filename, mode, reference_filename=self.reference_filename) as alignment_file:
+            # 收集符合条件的reads信息
+            all_candidates = []
+            
+            # 单次扫描收集所有候选
+            for region in self.regions:
+                for aligned_segment in alignment_file.fetch(self.chromosome, start=region.start, end=region.end):
+                    # 前置过滤条件
+                    if aligned_segment.is_unmapped or aligned_segment.cigartuples is None:
+                        continue
+                    
+                    # 标签过滤
+                    if self.filter_tags:
+                        skip = False
+                        for tag, allowed_values in self.filter_tags.items():
+                            try:
+                                actual_value = str(aligned_segment.get_tag(tag))
+                                if actual_value not in allowed_values:
+                                    self.skipped_reads += 1
+                                    skip = True
+                                    break
+                            except KeyError:
+                                self.skipped_reads += 1
+                                skip = True
+                                break
+                        if skip:
+                            continue
+                    
+                    # 记录候选信息
+                    all_candidates.append({
+                        'ref_pos': aligned_segment.reference_start,
+                        'query_name': aligned_segment.query_name,
+                        'ref_start': aligned_segment.reference_start,
+                        'is_high_quality': aligned_segment.mapping_quality > 30,
+                        'segment': aligned_segment
+                    })
+            
+            # 使用sampler进行采样
+            result = self.sampler.sample(all_candidates)
+            
+            # 处理采样结果
+            for idx in result.selected_indices:
+                candidate = all_candidates[idx]
+                segment = candidate['segment']
+                unique_key = f"{segment.query_name}_{segment.reference_start}"
+                
+                if unique_key not in self.reads:
+                    read_info = self._create_read_info(segment)
+                    self.reads[unique_key] = read_info
+                    if read_info.has_type(ReadType.LOCALPAIRED):
+                        self.localpaired_reads.setdefault(read_info.query_name, []).append(read_info)
+            
+            # 打印采样统计信息
+            print(f"Sampling statistics:")
+            for key, value in result.stats.items():
+                print(f"  - {key}: {value}")
+    
+    def _load_without_downsampling(self, mode):
+        """不使用降采样策略，加载所有符合条件的reads"""
+        with pysam.AlignmentFile(self.alignment_filename, mode, reference_filename=self.reference_filename) as alignment_file:
+            for region in self.regions:
+                for aligned_segment in alignment_file.fetch(self.chromosome, start=region.start, end=region.end):
+                    # 前置过滤条件
+                    if aligned_segment.is_unmapped or aligned_segment.cigartuples is None:
+                        continue
+                    
+                    # 标签过滤
+                    if self.filter_tags:
+                        skip = False
+                        for tag, allowed_values in self.filter_tags.items():
+                            try:
+                                actual_value = str(aligned_segment.get_tag(tag))
+                                if actual_value not in allowed_values:
+                                    self.skipped_reads += 1
+                                    skip = True
+                                    break
+                            except KeyError:
+                                self.skipped_reads += 1
+                                skip = True
+                                break
+                        if skip:
+                            continue
+                    
+                    # 创建read_info的逻辑
+                    unique_key = f"{aligned_segment.query_name}_{aligned_segment.reference_start}"
+                    if unique_key not in self.reads:
+                        read_info = self._create_read_info(aligned_segment)
+                        self.reads[unique_key] = read_info
+                        if read_info.has_type(ReadType.LOCALPAIRED):
+                            self.localpaired_reads.setdefault(read_info.query_name, []).append(read_info)
+
+def create_combined_read_manager(bam_file: str, chromosome: str, regions: List[Tuple[int, int, str]], reference_filename: str = None, 
+                                 filter_tags: Dict[str, Union[str, Iterable]] = None, sampler: BaseSampler = None) -> CombinedReadManager:
     region_objects = [Region(start, end, region_type) for start, end, region_type in regions]
-    return CombinedReadManager(bam_file, chromosome, region_objects, reference_filename)
+    return CombinedReadManager(bam_file, chromosome, region_objects, reference_filename, filter_tags, sampler)

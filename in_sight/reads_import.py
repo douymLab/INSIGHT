@@ -22,6 +22,8 @@ class AlignState(IntEnum):
     HARD_CLIPPED = auto()
     UNMAPPED = auto()
     UNKNOWN = auto()
+    INTRON_START = auto()
+    INTRON_END = auto() 
 
 class StructuredAttributes:
     def __init__(self):
@@ -226,8 +228,9 @@ class EnhancedRead:
         min_ref_pos = None
         min_query_pos = None
         bases_list = []
-        
-        # First pass to collect bases and find min positions
+        offset = 0
+        intron_gap = 0
+
         for operation, length in self.cigartuples:
             if operation == 0:  # Match or Mismatch
                 for i in range(length):
@@ -240,7 +243,6 @@ class EnhancedRead:
                         x=x_pos,
                         y=self.y_position
                     )
-                    bases_list.append(base)
                     if min_ref_pos is None or ref_pos < min_ref_pos:
                         min_ref_pos = ref_pos
                     if min_query_pos is None or query_pos < min_query_pos:
@@ -250,6 +252,8 @@ class EnhancedRead:
                     x_pos += 1
                     last_ref_pos = ref_pos - 1
                     insertion_offset = 0
+                    base.visual_x = base.x + offset + intron_gap
+                    bases_list.append(base)
             elif operation == 1:  # Insertion
                 for i in range(length):
                     base = SequenceBase(
@@ -261,11 +265,12 @@ class EnhancedRead:
                         x=x_pos - 1 + i,
                         y=self.y_position + 0.5
                     )
-                    bases_list.append(base)
                     if min_query_pos is None or query_pos < min_query_pos:
                         min_query_pos = query_pos
                     query_pos += 1
                     insertion_offset += 1
+                    base.visual_x = base.x + offset + intron_gap
+                    bases_list.append(base)
             elif operation == 2:  # Deletion
                 for i in range(length):
                     base = SequenceBase(
@@ -276,19 +281,54 @@ class EnhancedRead:
                         x=x_pos,
                         y=self.y_position
                     )
-                    bases_list.append(base)
                     if min_ref_pos is None or ref_pos < min_ref_pos:
                         min_ref_pos = ref_pos
                     ref_pos += 1
                     x_pos += 1
                     last_ref_pos = ref_pos - 1
                     insertion_offset = 0
+                    base.visual_x = base.x + offset + intron_gap
+                    bases_list.append(base)
+            elif operation == 3:  # N (Skipped region from the reference)
+                start_base = SequenceBase(
+                    base='N',
+                    query_pos=None,
+                    ref_pos=ref_pos,
+                    align_state=AlignState.INTRON_START,
+                    x=x_pos,
+                    y=self.y_position,
+                    visual_x=x_pos  # 暂时只设置x值，后续会更新visual_x
+                )
+                bases_list.append(start_base)
+
+                ref_pos += length
+                x_pos += 1
+
+                end_base = SequenceBase(
+                    base='N',
+                    query_pos=None,
+                    ref_pos=ref_pos - 1,
+                    align_state=AlignState.INTRON_END,
+                    x=x_pos,
+                    y=self.y_position,
+                    visual_x=x_pos  # 暂时只设置x值，后续会更新visual_x
+                )
+                bases_list.append(end_base)
+
+                x_pos += 1
+                last_ref_pos = ref_pos - 1
+                insertion_offset = 0
+
+                if min_ref_pos is None or ref_pos < min_ref_pos:
+                    min_ref_pos = ref_pos
+
+                intron_gap += end_base.ref_pos - start_base.ref_pos - 1
             elif operation == 4:  # Soft clipping
                 if x_pos == 0:  # Left soft-clipping
                     soft_clip_ref_pos = ref_pos - length
                 else:  # Right soft-clipping
                     soft_clip_ref_pos = last_ref_pos + 1
-                
+
                 for i in range(length):
                     base = SequenceBase(
                         base=self.query_sequence[query_pos],
@@ -299,12 +339,13 @@ class EnhancedRead:
                         x=x_pos,
                         y=self.y_position
                     )
-                    bases_list.append(base)
                     if min_query_pos is None or query_pos < min_query_pos:
                         min_query_pos = query_pos
                     query_pos += 1
                     x_pos += 1
                     insertion_offset = 0
+                    base.visual_x = base.x + offset + intron_gap
+                    bases_list.append(base)
             elif operation == 5:  # Hard clipping
                 for i in range(length):
                     base = SequenceBase(
@@ -315,21 +356,62 @@ class EnhancedRead:
                         x=x_pos,
                         y=self.y_position
                     )
-                    bases_list.append(base)
                     x_pos += 1
                     insertion_offset = 0
+                    base.visual_x = base.x + offset + intron_gap
+                    bases_list.append(base)
             else:
                 raise ValueError(f"Unknown CIGAR operation: {operation}")
-            
-        # Second pass to calculate and set visual_x for all bases
-        # Find first non-hard-clipped base's ref_pos and x
-        first_base = next((base for base in bases_list if base.align_state != AlignState.HARD_CLIPPED), None)
-        if first_base:
-            offset = first_base.ref_pos - first_base.x if first_base.ref_pos is not None else 0
-            
-            for base in bases_list:
-                base.visual_x = base.x + offset
 
+        # Second pass to calculate and set visual_x for all bases
+        # Split bases into segments between INTRON_START and INTRON_END
+        segments = []
+        current_segment = []
+        intron_boundaries = []  # 存储所有的INTRON_START和INTRON_END基础
+        in_intron = False
+        
+        for base in bases_list:
+            if base.align_state == AlignState.INTRON_START:
+                if current_segment:
+                    segments.append(current_segment)
+                current_segment = []
+                in_intron = True
+                intron_boundaries.append(base)  # 添加到内含子边界列表
+            elif base.align_state == AlignState.INTRON_END:
+                in_intron = False
+                intron_boundaries.append(base)  # 添加到内含子边界列表
+            elif not in_intron:
+                current_segment.append(base)
+        if current_segment:
+            segments.append(current_segment)
+
+        # Calculate visual_x for each segment separately
+        for i, segment in enumerate(segments):
+            first_base = next((base for base in segment if base.align_state != AlignState.HARD_CLIPPED), None)
+            if first_base and first_base.ref_pos is not None:
+                # 对于每个片段中的碱基，直接使用ref_pos作为visual_x
+                for base in segment:
+                    if base.ref_pos is not None:
+                        base.visual_x = base.ref_pos
+                    else:
+                        # 对于没有ref_pos的碱基（如硬裁剪），使用相对位置
+                        base.visual_x = first_base.ref_pos + (base.x - first_base.x)
+                
+                # 处理内含子边界
+                if i > 0 and len(intron_boundaries) >= 2*i:
+                    # 获取对应的内含子开始和结束碱基
+                    intron_start = intron_boundaries[2*i-2]
+                    intron_end = intron_boundaries[2*i-1]
+                    
+                    # 使用相邻片段的碱基来计算内含子边界的visual_x
+                    prev_segment = segments[i-1]
+                    if prev_segment:
+                        last_base = prev_segment[-1]
+                        # 内含子开始碱基的visual_x应该在上一个片段最后一个碱基之后
+                        intron_start.visual_x = last_base.ref_pos + 1
+                        # 内含子结束碱基的visual_x应该在当前片段第一个碱基之前
+                        intron_end.visual_x = first_base.ref_pos - 1
+        
         self.sequence_bases = bases_list
 
     def get_base_at_query_position(self, query_pos: int) -> Optional[SequenceBase]:
