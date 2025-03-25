@@ -15,6 +15,7 @@ networkx = "^3.3"
 duckdb = "^1.1.0"
 rpy2 = "^3.5.16"
 scipy = "^1.14.1"
+numpy = "^1.26.0"
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.5"
@@ -22,3 +23,6 @@ ipykernel = "^6.29.5"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+cf2insights = "in_sight.commands.cf2insights:main"
