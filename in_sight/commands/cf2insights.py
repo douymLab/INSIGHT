@@ -24,7 +24,7 @@ import time
 import re
 
 # Import in_sight modules
-from .vis_flow import base_visualization
+from ..vis_flow import base_visualization
 
 # Default configuration file path
 DEFAULT_CONFIG_PATH = 'cf2insights_config.yaml'
