@@ -90,6 +90,12 @@ def parse_args():
     
     return parser.parse_args()
 
+def check_bam_index(bam_path: str):
+    """Check if the BAM file has an index file"""
+    if not os.path.exists(bam_path + '.bai'):
+        logger.error(f"BAM file {bam_path} does not have an index file")
+        sys.exit(1)
+
 def get_config():
     """Get configuration from file and command line arguments"""
     args = parse_args()
@@ -364,7 +370,6 @@ def process_visualization_tasks(config, processing_list):
                 'filter_tags': {'CB': item['cb_label']},
                 'align_samples': config['align_samples']
             }
-            print(f"task_args: {task_args}")
             all_tasks.append((task_args, item))
             logger.info(f"Prepared task: {item['cb_label']} at {item['region']}")
         else:
@@ -482,6 +487,9 @@ def main():
     """Main function"""
     # Get configuration
     config = get_config()
+    
+    # Check BAM index
+    check_bam_index(config['bam_path'])
     
     # debug 
     print(f"config: {config}")
