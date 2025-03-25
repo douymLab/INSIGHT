@@ -24,3 +24,10 @@
 *.svg
 *.csv
 
+*.html
+*.json
+*.yaml
+*.yml
+*.jsonl
+*.jsonl.gz
+*.jsonl.bz2

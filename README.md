@@ -20,14 +20,14 @@ pip install -e .
 ### R Dependencies
 
 #### R Software
-Ensure R (≥4.0.0) is installed on your system.
+Ensure R (≥4.4.0) is installed
 
 #### R Packages
 Install required packages using one of these methods:
 
 * **via conda (recommended):**
 ```bash
-conda install r-base r-ggplot2 r-dplyr r-tidyr r-purrr r-readr r-gtable
+conda install r-base r-ggplot2=3.5.0 r-dplyr=1.1.0 r-tidyr r-purrr=1.0.0 r-readr=2.1.0 r-gtable=0.3.0 r-ragg=1.3.0 -c conda-forge
 ```
 
 * **Automatic installation through rpy2:**
@@ -37,7 +37,7 @@ python -m rpy2.situation -m in_sight.r_script.plot_base.R
 
 * **Manual installation:**
 ```bash
-R -e "install.packages(c('ggplot2','dplyr','tidyr','purrr','readr','gtable'))"
+R -e "install.packages(c('ggplot2>=3.5.0','dplyr>=1.1.0','tidyr','purrr>=1.0.0','readr>=2.1.0','gtable>=0.3.0','ragg>=1.3.0'))"
 ```
 
 ## Basic Usage
