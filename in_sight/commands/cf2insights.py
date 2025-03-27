@@ -22,6 +22,8 @@ from collections import defaultdict, Counter
 from typing import List, Tuple, Dict, Any
 import time
 import re
+# 添加tqdm库用于显示进度条
+from tqdm import tqdm
 
 # Import in_sight modules
 from ..vis_flow import base_visualization
@@ -30,15 +32,18 @@ from ..vis_flow import base_visualization
 DEFAULT_CONFIG_PATH = 'cf2insights_config.yaml'
 
 # Setup logging
-def setup_logging(log_file="cf2insights.log"):
+def setup_logging(log_file=None):
     """Set up logging configuration"""
+    handlers = [logging.StreamHandler(sys.stdout)]
+    
+    # 只有在指定日志文件时才添加文件处理器
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+        
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=handlers
     )
     return logging.getLogger("CF2Insights")
 
@@ -64,6 +69,10 @@ def parse_args():
     parser.add_argument('--config', '-c', default=DEFAULT_CONFIG_PATH,
                         help=f'Path to configuration file (default: {DEFAULT_CONFIG_PATH})')
     
+    # 添加日志文件选项
+    parser.add_argument('--log_file',
+                        help='Path to log file (if not specified, logs will only be printed to console)')
+    
     # Allow overriding config file with command line options
     parser.add_argument('--mutation_file', '-m',
                         help='Mutation information file (TSV format, cells as rows, mutations as columns)')
@@ -87,6 +96,14 @@ def parse_args():
                         help='Align samples')
     parser.add_argument('--mutation_parser', 
                         help='Rule for parsing mutation IDs (default, suffix, or regex:pattern)')
+    
+    # 添加新参数用于选择特定的mutation ID
+    parser.add_argument('--selected_mutations', '-s', nargs='+',
+                        help='Only process specified mutation IDs (space-separated list)')
+    
+    # 添加新参数用于高亮矩阵
+    parser.add_argument('--all_pileup_file', '-l',
+                        help='Optional all pileup sites for visualization (same format as mutation_file)')
     
     return parser.parse_args()
 
@@ -143,18 +160,22 @@ def get_config():
     if 'mutation_parser' not in config:
         config['mutation_parser'] = 'default'
     
+    # 添加高亮颜色默认值
+    if 'highlight_color' not in config:
+        config['highlight_color'] = 'red'
+    if 'highlight_bg_color' not in config:
+        config['highlight_bg_color'] = '#fff0f0'
+    
     return config
 
-def parse_mutation_file(mut_file: str, parse_rule: str = "default") -> Dict[str, Any]:
+def parse_mutation_file(mut_file: str, parse_rule: str = "default", selected_mutations: List[str] = None) -> Dict[str, Any]:
     """
     Parse mutation file and return structured mutation information
     
     Args:
         mut_file: Path to mutation information file (TSV format)
-        parse_rule: Rule for parsing mutation IDs. Options:
-                    - "default": chromosome_position_ref_alt (e.g. chr1_39034563_T_A)
-                    - "suffix": any_prefix_chromosome_position_ref_alt (e.g. P4_cSCC_chr1_1234_A_G)
-                    - "regex:pattern": Use custom regex pattern with named groups
+        parse_rule: Rule for parsing mutation IDs
+        selected_mutations: List of mutation IDs to process (if None, process all)
         
     Returns:
         Dict containing cell IDs and mutation information
@@ -181,8 +202,14 @@ def parse_mutation_file(mut_file: str, parse_rule: str = "default") -> Dict[str,
         'mutations': {}
     }
     
+    # 过滤mutation IDs如果指定了选择列表
+    mut_ids = df.columns
+    if selected_mutations:
+        mut_ids = [mid for mid in df.columns if mid in selected_mutations]
+        logger.info(f"Filtering to {len(mut_ids)} mutation IDs out of {len(df.columns)} total")
+    
     # Parse each mutation site
-    for mut_id in df.columns:
+    for mut_id in mut_ids:
         # Apply the specified parsing rule
         if parse_rule == "default":
             # Parse chromosome_position_ref_alt format
@@ -248,7 +275,7 @@ def parse_mutation_file(mut_file: str, parse_rule: str = "default") -> Dict[str,
 # result = parse_mutation_file("mutations.tsv", parse_rule=f"regex:{pattern}")
 
 def generate_report_by_region(region_data: Dict, images_dir: str, reports_dir: str, 
-                             region_id: str, template_file: str) -> None:
+                             region_id: str, template_file: str, config: Dict = None) -> None:
     """
     Generate an independent HTML report for each region using structured directory images
     
@@ -258,9 +285,19 @@ def generate_report_by_region(region_data: Dict, images_dir: str, reports_dir: s
         reports_dir: Report output directory
         region_id: Region's unique identifier
         template_file: HTML template file path
+        config: Configuration dictionary
     """
     # Get basic region information
     first_item = region_data['items'][0]
+    
+    # 设置默认高亮颜色
+    highlight_color = 'red'
+    highlight_bg_color = '#fff0f0'
+    
+    # 如果有配置，使用配置中的颜色
+    if config:
+        highlight_color = config.get('highlight_color', highlight_color)
+        highlight_bg_color = config.get('highlight_bg_color', highlight_bg_color)
     
     # Prepare template data
     template_data = {
@@ -269,7 +306,9 @@ def generate_report_by_region(region_data: Dict, images_dir: str, reports_dir: s
         'position': first_item['pos'],
         'reference': first_item['ref'],
         'alternate': first_item['alt'],
-        'samples': []
+        'samples': [],
+        'highlight_color': highlight_color,
+        'highlight_bg_color': highlight_bg_color
     }
     
     # Add data for each cell
@@ -293,7 +332,8 @@ def generate_report_by_region(region_data: Dict, images_dir: str, reports_dir: s
             'image_base64': image_base64,
             'is_empty': not os.path.exists(plot_path),
             'note_message': 'Plot not generated' if not os.path.exists(plot_path) else '',
-            'sampler_info': sampler_info  # 添加采样器信息
+            'sampler_info': sampler_info,  # 添加采样器信息
+            'highlight': item.get('highlight', False)  # 添加高亮标记
         }
         template_data['samples'].append(sample_data)
     
@@ -377,6 +417,9 @@ def process_visualization_tasks(config, processing_list):
     
     logger.info(f"Total of {len(all_tasks)} tasks to execute with {config['max_workers']} workers")
     
+    # 定义总任务数
+    total_tasks = len(all_tasks)
+    
     # Create process pool and submit all tasks
     with concurrent.futures.ProcessPoolExecutor(max_workers=config['max_workers']) as executor:
         # Create a dictionary to map futures to their task info
@@ -391,30 +434,35 @@ def process_visualization_tasks(config, processing_list):
         # 处理并存储结果
         results = {}
         
-        # Process results as they complete
-        for future in concurrent.futures.as_completed(future_to_task):
-            item = future_to_task[future]
-            try:
-                result = future.result()
-                # 保存采样器信息
-                region_id = f"{item['chrom']}_{item['pos']}_{item['ref']}_{item['alt']}"
-                if region_id not in results:
-                    results[region_id] = {}
+        # 创建进度条
+        with tqdm(total=total_tasks, desc="Processing tasks", unit="task") as progress_bar:
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_task):
+                item = future_to_task[future]
+                try:
+                    result = future.result()
+                    # 保存采样器信息
+                    region_id = f"{item['chrom']}_{item['pos']}_{item['ref']}_{item['alt']}"
+                    if region_id not in results:
+                        results[region_id] = {}
+                    
+                    # 保存该任务的sampler_info
+                    results[region_id][item['cb_label']] = {
+                        'sampler_info': result.get('sampler_info', {'total': 0, 'sampled': 0})
+                    }
+                    
+                    logger.info(f"Completed task: {item['cb_label']} at {item['region']} at {time.strftime('%H:%M:%S')}")
+                except Exception as e:
+                    logger.error(f"Visualization task error: {item['cb_label']} at {item['region']}, error: {e}")
+                    logger.debug(traceback.format_exc())
                 
-                # 保存该任务的sampler_info
-                results[region_id][item['cb_label']] = {
-                    'sampler_info': result.get('sampler_info', {'total': 0, 'sampled': 0})
-                }
-                
-                logger.info(f"Completed task: {item['cb_label']} at {item['region']} at {time.strftime('%H:%M:%S')}")
-            except Exception as e:
-                logger.error(f"Visualization task error: {item['cb_label']} at {item['region']}, error: {e}")
-                logger.debug(traceback.format_exc())
+                # 更新进度条
+                progress_bar.update(1)
         
-        # 将结果传递给报告生成函数
-        generate_all_reports(processing_list, images_base_dir, reports_dir, config['template_file'], results)
+        # 将结果传递给报告生成函数，同时传递config
+        generate_all_reports(processing_list, images_base_dir, reports_dir, config['template_file'], results, config)
 
-def generate_all_reports(processing_list, images_base_dir, reports_dir, template_file, results=None):
+def generate_all_reports(processing_list, images_base_dir, reports_dir, template_file, results=None, config=None):
     """Generate reports for all regions"""
     # Group by region
     region_groups = defaultdict(lambda: {'items': []})
@@ -435,7 +483,7 @@ def generate_all_reports(processing_list, images_base_dir, reports_dir, template
     # Generate report for each region
     for region_id, group_data in region_groups.items():
         region_images_dir = os.path.join(images_base_dir, region_id)
-        generate_report_by_region(group_data, region_images_dir, reports_dir, region_id, template_file)
+        generate_report_by_region(group_data, region_images_dir, reports_dir, region_id, template_file, config)
 
 def print_statistics(processing_list, config):
     """Print processing data statistics"""
@@ -488,6 +536,10 @@ def main():
     # Get configuration
     config = get_config()
     
+    # 重新设置日志记录器，使用配置中的log_file参数（如果存在）
+    global logger
+    logger = setup_logging(config.get('log_file'))
+    
     # Check BAM index
     check_bam_index(config['bam_path'])
     
@@ -497,8 +549,29 @@ def main():
     # Create base output directory
     os.makedirs(config['output_dir'], exist_ok=True)
     
-    # Parse mutation file
-    mutation_data = parse_mutation_file(config['mutation_file'], config['mutation_parser'])
+    # 获取选定的mutation IDs（如果有）
+    selected_mutations = config.get('selected_mutations')
+    
+    # Parse mutation file for highlighting
+    highlight_mutation_data = parse_mutation_file(
+        config['mutation_file'], 
+        config['mutation_parser'],
+        selected_mutations
+    )
+    
+    # 创建高亮集合，用于快速检查
+    highlight_mutations = set()
+    for region, info in highlight_mutation_data['mutations'].items():
+        for cb_label in info['positive_cells']:
+            # 创建唯一标识符
+            highlight_key = f"{info['chrom']}_{info['pos']}_{info['ref']}_{info['alt']}_{cb_label}"
+            highlight_mutations.add(highlight_key)
+    
+    # 如果提供了处理矩阵，则使用它，否则使用高亮矩阵
+    processing_mutation_file = config.get('all_pileup_file', config['mutation_file'])
+    processing_mutation_data = highlight_mutation_data
+    if 'all_pileup_file' in config and config['all_pileup_file'] != config['mutation_file']:
+        processing_mutation_data = parse_mutation_file(processing_mutation_file, config['mutation_parser'], config['selected_mutations'])
     
     # Create data directory and save raw input
     data_dir = os.path.join(config['output_dir'], 'data', 'raw')
@@ -506,15 +579,20 @@ def main():
     
     # Get all region and cell combinations to process
     processing_list = []
-    for region, info in mutation_data['mutations'].items():
+    for region, info in processing_mutation_data['mutations'].items():
         for cb_label in info['positive_cells']:
+            # 检查是否需要高亮
+            highlight_key = f"{info['chrom']}_{info['pos']}_{info['ref']}_{info['alt']}_{cb_label}"
+            is_highlighted = highlight_key in highlight_mutations
+            
             processing_list.append({
                 'region': region,
                 'cb_label': cb_label,
                 'chrom': info['chrom'],
                 'pos': info['pos'],
                 'ref': info['ref'],
-                'alt': info['alt']
+                'alt': info['alt'],
+                'highlight': is_highlighted  # 添加高亮标记
             })
     
     # Print statistics
