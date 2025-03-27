@@ -26,3 +26,7 @@ mutation_parser: default
 # # 使用自定义正则表达式处理复杂格式
 # mutation_parser = "regex:(?P<sample>\w+)_(?P<type>\w+)_(?P<chrom>chr\w+)_(?P<pos>\d+)_(?P<ref>[ACGTN])_(?P<alt>[ACGTN])"
 # result = parse_mutation_file("mutations.tsv", parse_rule=mutation_parser)
+
+# selected_mutations:
+#   - chr1_12345_A_G
+#   - chr2_67890_C_T
