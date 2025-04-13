@@ -1,5 +1,6 @@
 import pysam
 from pysam import FastaFile, VariantFile, AlignmentFile
+from pathlib import Path
 
 def check_chromosome_prefix(bam_path, chromosome):
     """
@@ -165,3 +166,40 @@ def get_head_hardclip(read):
     if cigar[0][0] == 5:  # 5 corresponds to the H operation in CIGAR
         return cigar[0][1]
     return 0
+
+def determine_file_type(filename):
+    """
+    Determine the file type (BAM, CRAM, SAM) based on the filename, supporting compressed files.
+
+    Parameters:
+        filename (str): The name or path of the file.
+
+    Returns:
+        str: The file type ('BAM', 'CRAM', 'SAM') or 'Unknown'.
+    """
+    suffixes = Path(filename).suffixes
+    if not suffixes:
+        return 'Unknown'
+    
+    # Get the last actual extension
+    extension = suffixes[-1].lower()
+    
+    if extension == '.bam':
+        return 'BAM'
+    elif extension == '.cram':
+        return 'CRAM'
+    elif extension == '.sam':
+        return 'SAM'
+    else:
+        return 'Unknown'
+
+def get_file_mode(file_type: str) -> str:
+    """Determine file mode based on file type"""
+    if file_type == "BAM":
+        return "rb"
+    elif file_type == "CRAM":
+        return "rc"
+    elif file_type == "SAM":
+        return "r"
+    else:
+        raise ValueError(f"Unsupported file type: {file_type}")

@@ -340,30 +340,23 @@
             {% for sample in samples %}
                 <div id="cell-{{loop.index}}" class="cell-title bg-light p-3 mb-3 rounded {% if sample.highlight %}highlighted-cell{% endif %}">
                     <h3 class="mb-0 {% if sample.highlight %}highlight-text{% endif %}">{{sample.cell_barcode}}{% if sample.highlight %} <i class="fas fa-star"></i>{% endif %}</h3>
-            </div>
-            {% if not sample.is_empty %}
-                <div class="row mb-4">
-                    <div class="col-12">
-                        <figure class="mb-2">
-                            <img src="data:image/png;base64,{{sample.image_base64}}" 
-                                 alt="Visualization for {{sample.cell_barcode}}"
-                                 class="img-fluid cell-image {% if sample.highlight %}highlighted-border{% endif %}"
-                                 data-title="{{sample.cell_barcode}}{% if sample.highlight %} (Highlighted){% endif %}"
-                                 data-image-id="{{loop.index}}"
-                                 onclick="openImageViewer(this)">
-                        </figure>
-                        <div class="sampling-info mt-2">
-                            <span class="text-primary">Total Reads: <strong>{{sample.sampler_info.total}}</strong></span>
-                            <span class="mx-3 text-success">Sampled Reads: <strong>{{sample.sampler_info.sampled}}</strong></span>
-                            {% if sample.sampler_info.total > 0 %}
-                            <span class="text-info">Sampling Rate: <strong>{{(sample.sampler_info.sampled / sample.sampler_info.total * 100)|round}}%</strong></span>
-                            {% endif %}
+                </div>
+                {% if not sample.is_empty %}
+                    <div class="row mb-4">
+                        <div class="col-12">
+                            <figure class="mb-2">
+                                <img src="data:image/png;base64,{{sample.image_base64}}" 
+                                     alt="Visualization for {{sample.cell_barcode}}"
+                                     class="img-fluid cell-image {% if sample.highlight %}highlighted-border{% endif %}"
+                                     data-title="{{sample.cell_barcode}}{% if sample.highlight %} (Highlighted){% endif %}"
+                                     data-image-id="{{loop.index}}"
+                                     onclick="openImageViewer(this)">
+                            </figure>
                         </div>
                     </div>
-                </div>
-            {% else %}
-                <p class="error-message mb-4 {% if sample.highlight %}highlight-text{% endif %}">{{sample.note_message}}</p>
-            {% endif %}
+                {% else %}
+                    <p class="error-message mb-4 {% if sample.highlight %}highlight-text{% endif %}">{{sample.note_message}}</p>
+                {% endif %}
             {% endfor %}
         </div>
     </div>

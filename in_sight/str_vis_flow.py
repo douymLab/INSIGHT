@@ -1,8 +1,9 @@
 import os
 from in_sight.reads_manager import create_combined_read_manager
 from in_sight.utils import adjust_chromosome_name
-from in_sight.samplers import MutationBasedSampler
-from in_sight.add_attr_info import hsnp_processor
+from in_sight.add_attr_info import hsnp_processor, str_data_processor
+from in_sight.analysis.hmm_model import StrReads
+from in_sight.utils import get_flanking_sequences, determine_file_type, get_file_mode
 from importlib import resources
 import in_sight
 import os
@@ -12,6 +13,62 @@ import time
 import io
 from PIL import Image
 import cairosvg
+from dataclasses import dataclass, field
+from typing import Any
+import pandas as pd
+import psutil
+import logging
+import traceback
+from typing import Optional
+import pysam
+@dataclass
+class STRRegion:
+    chrom: str
+    start: int
+    end: int
+    str_unit: str
+    str_id: str
+    str_unit_length: int
+    average_length: float
+    additional_info: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Convert types if needed
+        self.start = int(self.start)
+        self.end = int(self.end)
+        self.str_unit_length = int(self.str_unit_length)
+        self.average_length = float(self.average_length)
+
+    def __getitem__(self, key):
+        if key in self.__dict__:
+            return getattr(self, key)
+        return self.additional_info.get(key)
+
+    def __setitem__(self, key, value):
+        if key in self.__dict__:
+            setattr(self, key, value)
+        else:
+            self.additional_info[key] = value
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {k: v for k, v in self.__dict__.items() if k != 'additional_info' and v is not None}
+        result.update(self.additional_info)
+        return result
+
+def create_str_region_from_tsv(tsv_path: str, str_id: str) -> STRRegion:
+    """Create a STRRegion object from a TSV file"""
+    df = pd.read_csv(tsv_path, sep='\t')
+    str_region_info = df[df['str_id'] == str_id].to_dict(orient='records')[0]
+    
+    # Get the expected field names from STRRegion (excluding additional_info)
+    expected_fields = [f for f in STRRegion.__dataclass_fields__.keys() if f != 'additional_info']
+    
+    # Split the dictionary into expected fields and additional fields
+    main_fields = {k: v for k, v in str_region_info.items() if k in expected_fields}
+    additional_fields = {k: v for k, v in str_region_info.items() if k not in expected_fields}
+    
+    # Create the STRRegion with additional_info containing extra fields
+    return STRRegion(**main_fields, additional_info=additional_fields)
 
 def parse_region(region_str: str) -> Tuple[str, int, int]:
     """Parse region string into chrom, start, end components"""
@@ -90,21 +147,21 @@ def run_r_visualization(base_df_path, read_df_path, reference_df_path, output_fi
 
     print(f"Visualization saved to: {output_file}")
 
-def base_visualization(bam_path: str,
+def str_visulization(bam_path: str,
                     region: Union[str, List[str], List[Tuple[str, str]]],
                     reference_fasta: str = None,
-                    ref_base: str = None,
+                    str_id: str = None,
+                    str_region_info_path: str = None,
                     r_script_path: str = resources.files(in_sight).joinpath('r_script/plot_base.R'),
                     output_dir: str = "./",
                     prefix: str = "pileup_analysis",
                     run_visualization: bool = True,
-                    min_base_quality: int = 10,
-                    target_count: int = 500,
-                    filter_tags: dict = {},
                     mutation_region_label: str = None,  # 指定哪个区域标签用于突变范围
                     hsnp_region_label: str = None,     # 指定哪个区域应用hsnp处理器
                     hsnp_info: Dict[str, Dict[int, Tuple[str, str]]] = None,  # 添加hsnp信息参数
                     align_samples: bool = False,
+                    start_axis: int = 1,
+                    mut_type: str = "STR",
                     **kwargs):
     """
     Perform single base region analysis and generate visualizations
@@ -116,20 +173,18 @@ def base_visualization(bam_path: str,
                - List of strings: ["chrom:start-end", "chrom:pos", ...]
                - List of tuples: [(region_string, label), ...] where each tuple contains a region string and a custom label
         reference_fasta: Path to reference genome
-        ref_base: Reference base (optional)
+        str_id: STR ID
+        str_region_info_path: Path to STR region TSV file
         r_script_path: Path to R script for visualization
         output_dir: Output directory (default current directory)
         prefix: Output file prefix (default 'pileup_analysis')
         run_visualization: Whether to execute R visualization (default True)
-        min_base_quality: Minimum base quality for filtering (default 10)
-        target_count: Target read count for sampling (default 500)
-        filter_tags: Additional filter tags for read manager
         mutation_region_label: Label of the region to use for mutation start/end coordinates (default None, which uses all regions)
         hsnp_region_label: Label of the region to apply hsnp processor (default None)
         hsnp_info: HSNP information dictionary for the hsnp processor (required if hsnp_region_label is specified)
         align_samples: Whether to align samples (default False)
+        start_axis: Start position of the reference sequence (default 1)
         **kwargs: Additional parameters passed to sampler or read manager
-        
     Returns:
         Dictionary containing generated DataFrames and file paths
     """
@@ -180,59 +235,14 @@ def base_visualization(bam_path: str,
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
     
-    # 准备 sampler 参数 - 使用第一个区域进行采样（如果提供了ref_base）
-    sampler_kwargs = {
-        'target_count': target_count,
-        'chrom': chrom,
-        'pos': parsed_regions[0][0]-1,  # 使用第一个区域的位置进行采样
-        'min_base_quality': min_base_quality
-    }
-    
-    # debug 
-    print(f"sampler_kwargs: {sampler_kwargs}")
-    
-    # 仅当提供了 ref_base 时才添加该参数
-    if ref_base is not None:
-        sampler_kwargs['ref_base'] = ref_base
-        
-    print(f"sampler_kwargs: {sampler_kwargs}")
-        
-    # 从 kwargs 中提取可能的 sampler 参数
-    for key in list(kwargs.keys()):
-        if key in ['target_count', 'min_base_quality']:
-            sampler_kwargs[key] = kwargs.pop(key)
-            
-    if ref_base is not None or 'ref_base' in kwargs:  # 修改判断条件
-        sampler = MutationBasedSampler(**sampler_kwargs)
-        print(f"sampler: {sampler}")
-    else:
-        sampler = None
-        print(f"disable sampler")
-        
-    # 从 kwargs 中提取其他可能的过滤标签
-    if 'filter_tags' in kwargs:
-        # 合并现有的 filter_tags 与 kwargs 中的 filter_tags
-        kwargs_filter_tags = kwargs.pop('filter_tags')
-        if filter_tags:
-            filter_tags.update(kwargs_filter_tags)
-        else:
-            filter_tags = kwargs_filter_tags
-            
-    # 增加调试信息
-    print(f"Using filter_tags: {filter_tags}")
-    print(f"Debug: filter_tags being sent to manager: {filter_tags}")
-    
     # 创建分析管理器，使用解析后的多个区域
     manager = create_combined_read_manager(
         bam_path,
         chrom,
         parsed_regions,  # 现在传递多个区域及其自定义标签
-        reference_fasta,
-        filter_tags=filter_tags,
-        sampler=sampler,
-        **kwargs  # 传递剩余的参数给 read_manager
+        reference_fasta
     )
-    
+
     # 处理数据
     manager.clear_processors()
     
@@ -245,10 +255,17 @@ def base_visualization(bam_path: str,
             print(f"Adding HSNP processor for region '{hsnp_region_label}' ({hsnp_start}-{hsnp_end})")
             # 为该区域添加hsnp处理器
             manager.add_processor(hsnp_processor(hsnp_info, (hsnp_start, hsnp_end)))
+            
+    # 增加str_data
+    if str_region_info_path is not None and str_id is not None:
+        str_region = create_str_region_from_tsv(str_region_info_path, str_id)
+        str_id, str_reads = process_single_str_id(str_id, bam_path, reference_fasta, str_region)
+        manager.add_processor(str_data_processor(str_reads.str_data))
     
     manager.process_reads()
+    
     manager.sort_reads('start')
-    print(f"align_samples: {align_samples}")
+    
     if align_samples:
         print(f"align_samples: {align_samples}")
         ref_start = min(r[0] for r in parsed_regions) - 150
@@ -312,9 +329,9 @@ def base_visualization(bam_path: str,
             'output_file': file_paths['plot'],
             'mut_start': mut_start,
             'mut_end': mut_end,
-            'mut_type': "SNP",
+            'mut_type': mut_type,
             'r_script_path': r_script_path,
-            'start_axis': 1
+            'start_axis': start_axis
         }
         
         # 从 kwargs 中提取可能的可视化参数
@@ -491,3 +508,85 @@ def convert_svg_to_png(svg_path: str, png_path: str, dpi: int = 300, retries: in
                 return False
     
     return False
+
+def process_str_reads(bam_path: str, str_id: str, reference_fasta: str) -> Dict[str, StrReads]:
+    """Process STR reads for a single STR site
+    
+    Args:
+        bam_path: Path to BAM/CRAM file
+        str_id: Single STR ID to process
+        reference_fasta: Path to reference genome
+        
+    Returns:
+        Dictionary containing processed STR reads for the given ID
+    """
+    str_reads_dict = {}
+    
+    # 直接处理单个str_id
+    result = process_single_str_id(str_id, bam_path=bam_path, reference_fasta=reference_fasta)
+    
+    # 处理结果
+    if result is not None:
+        str_id, str_reads = result
+        if str_reads is not None:
+            str_reads_dict[str_id] = str_reads
+    
+    return str_reads_dict
+
+def get_memory_usage() -> str:
+    """Get current memory usage in a human-readable format"""
+    process = psutil.Process(os.getpid())
+    memory_mb = process.memory_info().rss / 1024 / 1024
+    return f"{memory_mb:.2f} MB"
+
+def process_single_str(
+    bam_path: str,
+    mode: str,
+    ref_filename: str,
+    single_region: Dict,
+    flanking_seqs: Tuple[str, str]
+) -> StrReads:
+    """Process a single STR region"""
+    left_flanking_three_bp, right_flanking_three_bp = flanking_seqs
+    
+    with pysam.AlignmentFile(bam_path, mode, reference_filename=ref_filename) as alignment_file:
+        str_reads = StrReads()
+        str_reads.compute_str_data(
+            alignment_file,
+            single_region['chrom'],
+            single_region['start'],
+            single_region['end']-1,
+            single_region['str_id'],
+            single_region['str_unit'],
+            left_flanking_three_bp,
+            right_flanking_three_bp
+        )
+        return str_reads
+
+def process_single_str_id(str_id: str, bam_path: str, reference_fasta: str, str_region: STRRegion) -> Tuple[str, Optional[StrReads]]:
+    """Process a single STR ID"""
+    start_time = time.time()
+    logging.info(f"Processing site: {str_id}")
+    
+    try:
+        single_region = str_region
+        
+        flanking_seqs = get_flanking_sequences(reference_fasta, single_region)
+        file_type = determine_file_type(bam_path)
+        
+        mode = get_file_mode(file_type)
+        str_reads = process_single_str(
+            bam_path, mode, reference_fasta, single_region, flanking_seqs
+        )
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"Completed processing {str_id} in {elapsed_time:.2f}s")
+        logging.info(f"Memory usage: {get_memory_usage()}")
+        
+        return str_id, str_reads
+        
+    except Exception as e:
+        logging.error(f"Error processing {str_id}: {str(e)}")
+        logging.error(traceback.format_exc())
+        return str_id, None
+
