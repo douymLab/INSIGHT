@@ -17,6 +17,9 @@
         h1, h2, h3 { color: #333; }
         .success { color: green; }
         .error { color: red; }
+        .value-highlight-0 { color: blue; }
+        .value-highlight-1 { color: red; }
+        .toc-highlight { color: red; font-weight: bold; }
         .missing-image { 
             display: flex; 
             justify-content: center; 
@@ -115,9 +118,13 @@
             padding: 4px 8px;
             border-radius: 4px;
             transition: background-color 0.2s;
+            color: #0066cc;
+            display: inline-block;
+            border-left: 3px solid transparent;
         }
         .toc a:hover {
             background-color: #e0e0e0;
+            text-decoration: none;
         }
         /* ======= Refined Sidebar Toggle Button ======= */
         .sidebar-toggle {
@@ -185,6 +192,32 @@
         }
         .toc-group-items.collapsed {
             display: none;
+        }
+        
+        /* Sample title styling */
+        .sample-title {
+            margin-top: 0;
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #ddd;
+            font-size: 1.4em;
+        }
+        
+        /* TOC Link Styles - Regular links */
+        .toc a {
+            text-decoration: none;
+            color: #0066cc;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background-color 0.2s, color 0.2s;
+            display: inline-block;
+            border-left: 3px solid transparent;
+            margin: 2px 0;
+        }
+        
+        .toc a:hover {
+            background-color: #e0e0e0;
+            text-decoration: none;
         }
         
         /* 图片样式和查看器 */
@@ -361,7 +394,41 @@
             text-overflow: ellipsis;
         }
         */
+        .highlighted-cell {
+            border: 2px solid red;
+            background-color: #fff0f0;
+            box-shadow: 0 0 10px rgba(255, 0, 0, 0.2);
+        }
+        
+        .highlight-text {
+            color: red;
+            font-weight: bold;
+        }
+        
+        /* Ensure TOC highlights take precedence over link styling */
+        .toc a.toc-highlight,
+        .toc-highlight {
+            color: red;
+            font-weight: bold;
+        }
+        
+        /* Override hover effect for highlighted TOC items */
+        .toc a.toc-highlight:hover {
+            color: red;
+            background-color: rgba(255, 0, 0, 0.15);
+            text-decoration: none;
+            cursor: pointer;  /* Keep the pointer cursor */
+        }
+        
+        /* Completely remove link styling for highlighted TOC entries */
+        .toc a.toc-highlight:link,
+        .toc a.toc-highlight:visited,
+        .toc a.toc-highlight:active {
+            color: red;
+            text-decoration: none;
+        }
     </style>
+    <!-- Dynamic styles will be applied inline -->
     <!-- Font Awesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
     <!-- OpenSeadragon for handling very large images -->
@@ -387,12 +454,20 @@
                             <div class="toc-group-items">
                                 <ul class="list-unstyled ms-3 mt-2">
                                     {% for task in tasks %}
+                                    {% set ns = namespace(has_mut_prob_1=false) %}
+                                    {% if task.sample_data_rows_flat %}
+                                        {% for row in task.sample_data_rows_flat %}
+                                            {% if (row.attribute == 'mut_cell_prob' or row.attribute.startswith('mut_cell_prob_')) and row.value|string == '1' %}
+                                                {% set ns.has_mut_prob_1 = true %}
+                                            {% endif %}
+                                        {% endfor %}
+                                    {% endif %}
                                     <li class="mb-1">
-                                        <a href="#sample-{{loop.index}}" class="text-decoration-none">
-                                            {{ task.individual_code }}_{{ task.sample_name }}
-                                        </a>
+                                       <a href="#sample-{{ loop.index }}" class="text-decoration-none {% if ns.has_mut_prob_1 %}toc-highlight{% endif %}" {% if ns.has_mut_prob_1 %}style="color: {{ highlight_color|default('red') }};"{% endif %}>
+                                           {{ task.individual_code }}_{{ task.sample_name }}
+                                       </a>
                                     </li>
-                                    {% endfor %}
+                                {% endfor %}                                
                                 </ul>
                             </div>
                         </li>
@@ -454,7 +529,20 @@
             
             <div class="image-container">
             {% for task in tasks %}
-                <div id="sample-{{loop.index}}" class="image-card">
+            {% set ns = namespace(has_mut_prob_1=false) %}
+            {% if task.sample_data_rows_flat %}
+                 {% for row in task.sample_data_rows_flat %}
+                     {% if (row.attribute == 'mut_cell_prob' or row.attribute.startswith('mut_cell_prob_')) and row.value|string == '1' %}
+                         {% set ns.has_mut_prob_1 = true %}
+                     {% endif %}
+                 {% endfor %}
+            {% endif %}
+            <div id="sample-{{ loop.index }}" class="image-card {% if ns.has_mut_prob_1 %}highlighted-cell{% endif %}" 
+                 {% if ns.has_mut_prob_1 %}style="border: 2px solid {{ highlight_color|default('red') }}; background-color: {{ highlight_bg_color|default('#fff0f0') }};"{% endif %}>
+                <h3 class="sample-title {% if ns.has_mut_prob_1 %}highlight-text{% endif %}" 
+                    {% if ns.has_mut_prob_1 %}style="color: {{ highlight_color|default('red') }};"{% endif %}>
+                    {{ task.individual_code }}_{{ task.sample_name }}
+                </h3>
                     {% if task.status == 'missing' %}
                     <div class="missing-image">
                         <div>
@@ -478,7 +566,7 @@
                         {% endif %}
                     {% endif %}
                     <div class="image-meta">
-                        <strong>Sample Name:</strong> {{ task.sample_name }} | <strong>Sample Type:</strong> {{ task.pro_type }} | <strong>Individual Code:</strong> {{ task.individual_code }}
+                        <strong class="{% if has_mut_prob_1 %}highlight-text{% endif %}">Sample Name:</strong> {{ task.sample_name }} | <strong>Sample Type:</strong> {{ task.pro_type }} | <strong>Individual Code:</strong> {{ task.individual_code }}
                         {% if task.sort_value != 'N/A' %}
                         <strong>Sort Value:</strong> {{ task.sort_value }}
                         {% endif %}
@@ -506,7 +594,19 @@
                                     {% for row in task.sample_data_rows_flat %}
                                     <tr>
                                         <td>{{ row.attribute }}</td>
-                                        <td>{{ row.value }}</td>
+                                        <td>
+                                            {% if row.attribute == 'mut_cell_prob' or row.attribute.startswith('mut_cell_prob_') %}
+                                                {% if row.value|string == '1' %}
+                                                    <span class="value-highlight-1" style="color: {{ highlight_color|default('red') }};">{{ row.value }}</span>
+                                                {% elif row.value|string == '0' %}
+                                                    <span class="value-highlight-0">{{ row.value }}</span>
+                                                {% else %}
+                                                    {{ row.value }}
+                                                {% endif %}
+                                            {% else %}
+                                                {{ row.value }}
+                                            {% endif %}
+                                        </td>
                                         <td>{{ row.description }}</td>
                                     </tr>
                                     {% endfor %}
@@ -549,66 +649,6 @@
     </div>
 
     <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        try {
-            console.log("初始化报告...");
-            
-            // 记录全局数据
-            {% if global_data_rows_flat %}
-            console.log("全局数据行数: " + {{ global_data_rows_flat|length }});
-            {% else %}
-            console.log("无全局数据");
-            {% endif %}
-            
-            // 记录样本数据
-            console.log("样本数: " + {{ tasks|length }});
-            {% for task in tasks %}
-            {% if task.sample_data_rows_flat %}
-            console.log("样本 {{loop.index}} 数据行数: " + {{ task.sample_data_rows_flat|length }});
-            {% else %}
-            console.log("样本 {{loop.index}} 无数据");
-            {% endif %}
-            {% endfor %}
-            
-            // Load sidebar state
-            loadStateFromLocalStorage();
-            
-            // Save sidebar state on change
-            document.getElementById('sidebarWrapper').addEventListener('transitionend', saveStateToLocalStorage);
-            
-            // Add click event to all images
-            var images = document.querySelectorAll('.image-card img');
-            for (var i = 0; i < images.length; i++) {
-                if (!images[i].closest('.missing-image')) {  // Only add event to existing images
-                    images[i].addEventListener('click', function() {
-                        openImageViewer(this);
-                    });
-                }
-            }
-            
-            // Auto-close sidebar on mobile when TOC link is clicked
-            if (window.innerWidth <= 768) {
-                document.querySelectorAll('.toc a').forEach(link => {
-                    link.addEventListener('click', function() {
-                        document.getElementById('sidebarWrapper').classList.remove('active');
-                    });
-                });
-            }
-
-            console.log("报告初始化完成");
-        } catch(e) {
-            console.error("初始化报告时出错:", e);
-            // 在页面上显示错误，方便调试
-            var errorDiv = document.createElement('div');
-            errorDiv.style.color = 'red';
-            errorDiv.style.padding = '10px';
-            errorDiv.style.backgroundColor = '#ffeeee';
-            errorDiv.style.border = '1px solid red';
-            errorDiv.style.margin = '10px 0';
-            errorDiv.innerHTML = '<h3>初始化出错</h3><pre>' + e.toString() + '\n' + e.stack + '</pre>';
-            document.body.insertBefore(errorDiv, document.body.firstChild);
-        }
-    });
     
     // ========== Sidebar Functionality ==========
     function toggleSidebar() {

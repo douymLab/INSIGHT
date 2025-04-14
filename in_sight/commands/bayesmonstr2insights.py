@@ -721,7 +721,7 @@ def generate_html_report(
             report_filename += '.html'
         html_file = os.path.join(output_dir, report_filename)
     else:
-        html_file = os.path.join(output_dir, f"{str_id}_report.html")
+        html_file = os.path.join(output_dir, f"{ic_for_replacement}_{str_id}_report.html")
     
     # If no column description dictionary is provided, create an empty one
     if column_descriptions is None:
@@ -843,15 +843,35 @@ def generate_html_report(
             # Distribute based on index
             distributed_for_col = {}
             for i, sample_meta in enumerate(all_metadata_samples):
-                if isinstance(parsed_value, (list, tuple)):
-                    if 0 <= i < len(parsed_value):
-                        distributed_for_col[i] = parsed_value[i] # Use index directly
+                # 特殊处理第一个样本（索引为0），第一个样本的数据不在数据库中
+                if i == 0:
+                    distributed_for_col[i] = "N/A"
+                    continue
+                    
+                # 处理值为None或无效的情况
+                if parsed_value is None:
+                    distributed_for_col[i] = "N/A"
+                elif isinstance(parsed_value, (list, tuple)):
+                    # 由于第一个样本特殊，列表的索引需要偏移 -1
+                    list_index = i - 1
+                    if 0 <= list_index < len(parsed_value):
+                        # 检查列表中的值是否为None或空
+                        if parsed_value[list_index] is None or parsed_value[list_index] == '':
+                            distributed_for_col[i] = "N/A"
+                        else:
+                            distributed_for_col[i] = parsed_value[list_index] # 使用偏移的索引
                     else:
                         distributed_for_col[i] = "[Index out of bounds]"
                 else:
-                    distributed_for_col[i] = parsed_value # Repeat non-sequence value
+                    # 检查值是否为空字符串
+                    if parsed_value == '':
+                        distributed_for_col[i] = "N/A"
+                    else:
+                        distributed_for_col[i] = parsed_value # Repeat non-sequence value
                    
             sample_data_distributed[col] = distributed_for_col
+    
+    print(f"sample_data_distributed: {sample_data_distributed}")
     
     # Prepare template data
     template_data = {
@@ -1111,6 +1131,11 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
             # Skip rows that don't include
             if 'include' in row and row['include'].lower() not in ['1', 'true', 'yes', 'y']:
                 continue
+            
+            # Skip rows that don't in current individual_code
+            if hasattr(args, 'individual_code') and args.individual_code:
+                if row[ic_col] != args.individual_code:
+                    continue
                 
             try:
                 individual_code = row[ic_col]
