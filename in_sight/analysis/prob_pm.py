@@ -448,9 +448,15 @@ def classify_allelic_reads(str_unit_length, stutter, read, mu_g_allele, mu_m_all
     
     try:
         read_probs = [[phred_score_q(q) for q in qualities] for qualities in read_qualities]
-
-        prob_to_mu_g = read_allele_prob(read, mu_g_allele, str_unit_length, stutter, read_probs, pro_type=pro_type)
-        prob_to_mu_m = read_allele_prob(read, mu_m_allele, str_unit_length, stutter, read_probs, pro_type=pro_type)
+        
+        if mu_g_allele is None:
+            prob_to_mu_g = -np.inf  
+        else:
+            prob_to_mu_g = read_allele_prob(read, mu_g_allele, str_unit_length, stutter, read_probs, pro_type=pro_type)
+        if mu_m_allele is None:
+            prob_to_mu_m = -np.inf
+        else:
+            prob_to_mu_m = read_allele_prob(read, mu_m_allele, str_unit_length, stutter, read_probs, pro_type=pro_type)
 
         def create_result(allele_source, probs):
             res = {'allele_source': allele_source, 'probs': probs}

@@ -12,6 +12,7 @@ from functools import cmp_to_key
 from pathlib import Path
 import random
 import numpy as np
+import traceback
 
 class Region:
     def __init__(self, start: int, end: int, region_type: str):
@@ -410,7 +411,16 @@ class CombinedReadManager:
     def _apply_processors(self):
         for read in self.reads.values():
             for processor in self.processors:
-                processor(read)
+                try:
+                    processor(read)
+                except Exception as e:
+                    print(f"Error in processor {processor.__name__ if hasattr(processor, '__name__') else processor}:")
+                    print(f"  Read: {read.query_name}_{read.reference_start}")
+                    print(f"  Error: {type(e).__name__}: {str(e)}")
+                    print("  Traceback:")
+                    traceback.print_exc()
+                    # You can raise the exception again if you want to stop processing
+                    # raise
 
     def add_processor(self, processor: Callable[[CombinedReadInfo], None]):
         self.processors.append(processor)

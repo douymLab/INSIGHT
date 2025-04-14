@@ -1,102 +1,20 @@
 import os
 from in_sight.reads_manager import create_combined_read_manager
-from in_sight.utils import adjust_chromosome_name
-from in_sight.add_attr_info import hsnp_processor, str_data_processor
-from in_sight.analysis.hmm_model import StrReads
+from in_sight.utils import parse_region, convert_pdf_to_png, get_memory_usage, HSNPInfo
 from in_sight.utils import get_flanking_sequences, determine_file_type, get_file_mode
+from in_sight.add_attr_info import hsnp_processor, str_data_processor, classify_allelic_reads_processor
+from in_sight.analysis.hmm_model import StrReads
 from importlib import resources
 import in_sight
 import os
 import subprocess
 from typing import List, Tuple, Union, Dict
 import time
-import io
-from PIL import Image
-import cairosvg
-from dataclasses import dataclass, field
-from typing import Any
-import pandas as pd
-import psutil
 import logging
 import traceback
 from typing import Optional
 import pysam
-@dataclass
-class STRRegion:
-    chrom: str
-    start: int
-    end: int
-    str_unit: str
-    str_id: str
-    str_unit_length: int
-    average_length: float
-    additional_info: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        # Convert types if needed
-        self.start = int(self.start)
-        self.end = int(self.end)
-        self.str_unit_length = int(self.str_unit_length)
-        self.average_length = float(self.average_length)
-
-    def __getitem__(self, key):
-        if key in self.__dict__:
-            return getattr(self, key)
-        return self.additional_info.get(key)
-
-    def __setitem__(self, key, value):
-        if key in self.__dict__:
-            setattr(self, key, value)
-        else:
-            self.additional_info[key] = value
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = {k: v for k, v in self.__dict__.items() if k != 'additional_info' and v is not None}
-        result.update(self.additional_info)
-        return result
-
-def create_str_region_from_tsv(tsv_path: str, str_id: str) -> STRRegion:
-    """Create a STRRegion object from a TSV file"""
-    df = pd.read_csv(tsv_path, sep='\t')
-    str_region_info = df[df['str_id'] == str_id].to_dict(orient='records')[0]
-    
-    # Get the expected field names from STRRegion (excluding additional_info)
-    expected_fields = [f for f in STRRegion.__dataclass_fields__.keys() if f != 'additional_info']
-    
-    # Split the dictionary into expected fields and additional fields
-    main_fields = {k: v for k, v in str_region_info.items() if k in expected_fields}
-    additional_fields = {k: v for k, v in str_region_info.items() if k not in expected_fields}
-    
-    # Create the STRRegion with additional_info containing extra fields
-    return STRRegion(**main_fields, additional_info=additional_fields)
-
-def parse_region(region_str: str) -> Tuple[str, int, int]:
-    """Parse region string into chrom, start, end components"""
-    if ':' not in region_str:
-        raise ValueError(f"Invalid region format: {region_str}")
-    
-    chrom, pos_part = region_str.split(':', 1)
-    pos_part = pos_part.replace(',', '')  # 移除可能存在的千位分隔符
-    
-    if '-' in pos_part:
-        start_str, end_str = pos_part.split('-', 1)
-    else:
-        start_str = end_str = pos_part
-    
-    try:
-        start = int(start_str)
-        end = int(end_str)
-    except ValueError:
-        raise ValueError(f"Invalid position in region: {region_str}")
-    
-    # 新增处理：当start=end时自动将end+1
-    if start == end:
-        end += 1
-    
-    if start > end:
-        raise ValueError(f"Start position ({start}) cannot be greater than end position ({end})")
-    
-    return chrom, start, end
+from in_sight.str_utils import STRRegion
 
 def run_r_visualization(base_df_path, read_df_path, reference_df_path, output_file="output.svg", 
                        mut_start=None, mut_end=None, mut_type=None, start_axis=None,
@@ -151,17 +69,19 @@ def str_visulization(bam_path: str,
                     region: Union[str, List[str], List[Tuple[str, str]]],
                     reference_fasta: str = None,
                     str_id: str = None,
-                    str_region_info_path: str = None,
+                    str_region_info: STRRegion = None,
                     r_script_path: str = resources.files(in_sight).joinpath('r_script/plot_base.R'),
                     output_dir: str = "./",
                     prefix: str = "pileup_analysis",
                     run_visualization: bool = True,
                     mutation_region_label: str = None,  # 指定哪个区域标签用于突变范围
                     hsnp_region_label: str = None,     # 指定哪个区域应用hsnp处理器
-                    hsnp_info: Dict[str, Dict[int, Tuple[str, str]]] = None,  # 添加hsnp信息参数
+                    hsnp_info: HSNPInfo = None,  # 添加hsnp信息参数
                     align_samples: bool = False,
                     start_axis: int = 1,
                     mut_type: str = "STR",
+                    pro_type: str = None,
+                    individual_code: str = None,
                     **kwargs):
     """
     Perform single base region analysis and generate visualizations
@@ -174,7 +94,7 @@ def str_visulization(bam_path: str,
                - List of tuples: [(region_string, label), ...] where each tuple contains a region string and a custom label
         reference_fasta: Path to reference genome
         str_id: STR ID
-        str_region_info_path: Path to STR region TSV file
+        str_region_info: Class for STR region
         r_script_path: Path to R script for visualization
         output_dir: Output directory (default current directory)
         prefix: Output file prefix (default 'pileup_analysis')
@@ -184,6 +104,9 @@ def str_visulization(bam_path: str,
         hsnp_info: HSNP information dictionary for the hsnp processor (required if hsnp_region_label is specified)
         align_samples: Whether to align samples (default False)
         start_axis: Start position of the reference sequence (default 1)
+        mut_type: Type of the mutation (default "STR")
+        pro_type: Type of the sample (default None)
+        individual_code: Individual code (default None)
         **kwargs: Additional parameters passed to sampler or read manager
     Returns:
         Dictionary containing generated DataFrames and file paths
@@ -250,21 +173,29 @@ def str_visulization(bam_path: str,
     if hsnp_region_label is not None and hsnp_info is not None:
         # 找到指定标签的区域
         hsnp_regions = [r for r in parsed_regions if r[2] == hsnp_region_label]
+        str_regions = [r for r in parsed_regions if r[2] == mutation_region_label]
         if hsnp_regions:
             hsnp_start, hsnp_end, _ = hsnp_regions[0]
+            str_start, str_end, _ = str_regions[0]
             print(f"Adding HSNP processor for region '{hsnp_region_label}' ({hsnp_start}-{hsnp_end})")
             # 为该区域添加hsnp处理器
-            manager.add_processor(hsnp_processor(hsnp_info, (hsnp_start, hsnp_end)))
+            manager.add_processor(hsnp_processor(hsnp_info, (str_start, str_end)))
             
     # 增加str_data
-    if str_region_info_path is not None and str_id is not None:
-        str_region = create_str_region_from_tsv(str_region_info_path, str_id)
+    if str_region_info is not None and str_id is not None:
+        str_region = str_region_info
         str_id, str_reads = process_single_str_id(str_id, bam_path, reference_fasta, str_region)
+        print(f"Adding STR data processor for region '{str_id}'")
         manager.add_processor(str_data_processor(str_reads.str_data))
+
+    # 增加classify_allelic_reads
+    if str_id is not None and str_reads is not None and pro_type is not None and individual_code is not None:
+        print(f"Adding classify_allelic_reads processor for region '{str_id}'")
+        manager.add_processor(classify_allelic_reads_processor(str_reads.str_data, str_region_info, pro_type, individual_code = individual_code))
     
     manager.process_reads()
     
-    manager.sort_reads('start')
+    manager.sort_reads('classify_allelic_reads.allele_source', 'snp.paired_hsnp_allele', 'str_info.STR_position', 'start', reverse=False)
     
     if align_samples:
         print(f"align_samples: {align_samples}")
@@ -351,163 +282,7 @@ def str_visulization(bam_path: str,
         'sampler_info': sampler_info
     }
 
-def convert_pdf_to_png(pdf_path: str, png_path: str, dpi: int = 300, retries: int = 3,
-                      background_color: str = 'white', max_dpi: int = 1200) -> bool:
-    """Convert PDF to PNG using ImageMagick with automatic DPI adjustment and error handling.
-    
-    Args:
-        pdf_path (str): Path to input PDF file
-        png_path (str): Path to output PNG file
-        dpi (int): Initial DPI value for conversion (default: 300)
-        retries (int): Number of retry attempts with reduced DPI (default: 3)
-        background_color (str): Background color for the PNG (default: 'white')
-        max_dpi (int): Maximum allowed DPI value (default: 1200)
-        
-    Returns:
-        bool: True if conversion successful, False otherwise
-        
-    Raises:
-        FileNotFoundError: If input PDF file does not exist
-        ValueError: If DPI value is invalid
-    """
-    start_time = time.time()
-    current_dpi = min(max_dpi, max(1, dpi))  # 确保DPI在有效范围内
-    
-    # 验证输入文件
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"Input PDF file not found: {pdf_path}")
-    
-    # 确保输出目录存在
-    os.makedirs(os.path.dirname(png_path), exist_ok=True)
-    
-    for attempt in range(retries + 1):
-        try:
-            # 构建ImageMagick命令
-            cmd = [
-                'convert',
-                '-density', str(current_dpi),
-                '-background', background_color,
-                '-alpha', 'remove',
-                '-quality', '95',
-                '-strip',  # 移除元数据以减小文件大小
-                pdf_path,
-                png_path
-            ]
-            
-            # 执行转换命令
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            
-            # 验证输出文件
-            if os.path.exists(png_path) and os.path.getsize(png_path) > 0:
-                print(f"Successfully converted {pdf_path} to {png_path} (DPI: {current_dpi})")
-                return True
-            else:
-                raise RuntimeError("Output file is empty or was not created")
-                
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: Conversion failed at DPI {current_dpi}: {e.stderr}")
-            if attempt < retries:
-                # 指数退避策略
-                current_dpi = max(1, current_dpi // 2)
-                print(f"Retrying with DPI {current_dpi}...")
-                time.sleep(1)  # 添加短暂延迟
-            else:
-                print("ERROR: Conversion failed after all attempts")
-                return False
-        except Exception as e:
-            print(f"Unexpected error during PDF to PNG conversion: {str(e)}")
-            return False
-    
-    return False
-
-def convert_svg_to_png(svg_path: str, png_path: str, dpi: int = 300, retries: int = 3, 
-                      background_color: str = 'white', max_dpi: int = 1200) -> bool:
-    """Convert SVG to PNG with automatic DPI adjustment and error handling.
-    
-    Args:
-        svg_path (str): Path to input SVG file
-        png_path (str): Path to output PNG file
-        dpi (int): Initial DPI value for conversion (default: 300)
-        retries (int): Number of retry attempts with reduced DPI (default: 3)
-        background_color (str): Background color for the PNG (default: 'white')
-        max_dpi (int): Maximum allowed DPI value (default: 1200)
-        
-    Returns:
-        bool: True if conversion successful, False otherwise
-        
-    Raises:
-        FileNotFoundError: If input SVG file does not exist
-        ValueError: If DPI value is invalid
-    """
-    start_time = time.time()
-    current_dpi = min(max_dpi, max(1, dpi))  # 确保DPI在有效范围内
-    
-    # 验证输入文件
-    if not os.path.exists(svg_path):
-        raise FileNotFoundError(f"Input SVG file not found: {svg_path}")
-    
-    # 确保输出目录存在
-    os.makedirs(os.path.dirname(png_path), exist_ok=True)
-    
-    for attempt in range(retries + 1):
-        try:
-            # 禁用PIL的最大图像像素限制
-            Image.MAX_IMAGE_PIXELS = None
-            
-            # 读取SVG文件
-            with open(svg_path, 'rb') as svg_file:
-                svg_data = svg_file.read()
-            
-            # 使用cairosvg进行转换
-            png_data = cairosvg.svg2png(
-                bytestring=svg_data,
-                dpi=current_dpi,
-                background_color=background_color
-            )
-            
-            # 使用PIL处理图像
-            with Image.open(io.BytesIO(png_data)) as img:
-                # 确保图像是RGB模式
-                if img.mode in ('RGBA', 'LA'):
-                    background = Image.new('RGB', img.size, background_color)
-                    background.paste(img, mask=img.split()[-1])
-                    img = background
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                # 保存图像
-                img.save(
-                    png_path,
-                    "PNG",
-                    dpi=(current_dpi, current_dpi),
-                    optimize=True,
-                    quality=95
-                )
-            
-            # 验证输出文件
-            if os.path.exists(png_path) and os.path.getsize(png_path) > 0:
-                print(f"Successfully converted to PNG: {png_path} (DPI: {current_dpi})")
-                return True
-            else:
-                raise RuntimeError("Output file is empty or was not created")
-                
-        except Exception as e:
-            print(f"ERROR: Conversion failed at DPI {current_dpi}: {str(e)}")
-            if attempt < retries:
-                # 指数退避策略
-                current_dpi = max(1, current_dpi // 2)
-                print(f"Retrying with DPI {current_dpi}...")
-                time.sleep(1)  # 添加短暂延迟
-            else:
-                print("ERROR: Conversion failed after all attempts")
-                return False
-    
-    return False
+## section for process str reads
 
 def process_str_reads(bam_path: str, str_id: str, reference_fasta: str) -> Dict[str, StrReads]:
     """Process STR reads for a single STR site
@@ -533,13 +308,7 @@ def process_str_reads(bam_path: str, str_id: str, reference_fasta: str) -> Dict[
     
     return str_reads_dict
 
-def get_memory_usage() -> str:
-    """Get current memory usage in a human-readable format"""
-    process = psutil.Process(os.getpid())
-    memory_mb = process.memory_info().rss / 1024 / 1024
-    return f"{memory_mb:.2f} MB"
-
-def process_single_str(
+def process_str_segment(
     bam_path: str,
     mode: str,
     ref_filename: str,
@@ -575,7 +344,7 @@ def process_single_str_id(str_id: str, bam_path: str, reference_fasta: str, str_
         file_type = determine_file_type(bam_path)
         
         mode = get_file_mode(file_type)
-        str_reads = process_single_str(
+        str_reads = process_str_segment(
             bam_path, mode, reference_fasta, single_region, flanking_seqs
         )
         

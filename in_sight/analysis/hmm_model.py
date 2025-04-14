@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import pysam
 
-_DEBUG = True
+_DEBUG = False
 
 # ----------------------------- Hidden Markov Model Parameters Begin ----------------------------- #
 ALL_MOTIF__PARAMS = {}

@@ -1,7 +1,8 @@
 from typing import Dict, Any, Callable, Tuple, List
 from .reads_import import EnhancedRead
 from .reads_manager import CombinedReadInfo, ReadType
-from .utils import get_head_softclip, get_head_hardclip
+from .utils import get_head_softclip, get_head_hardclip, HSNPInfo
+from .str_utils import STRRegion
 from .analysis.prob_pm import classify_allelic_reads
 
 # processor for STR data
@@ -37,13 +38,14 @@ def str_data_processor(str_info_dict: Dict[str, Dict[str, Any]]):
     return process
 
 # processor for HSNP data
-def hsnp_processor(hsnp_info: Dict[str, Dict[int, Tuple[str, str]]], target_region: Tuple[int, int]):
+def hsnp_processor(hsnp_info: HSNPInfo, target_region: Tuple[int, int]):
     paired_reads: Dict[str, List[CombinedReadInfo]] = {}
     str_start, str_end = target_region
 
     def process(read: CombinedReadInfo):
         chrom = read.reference_name
-        if chrom not in hsnp_info:
+        if chrom not in hsnp_info.variant.chrom:
+            print(f"chrom {chrom} not in hsnp_info.variant.chrom")
             return
 
         is_any_hsnp_base = False
@@ -56,9 +58,9 @@ def hsnp_processor(hsnp_info: Dict[str, Dict[int, Tuple[str, str]]], target_regi
                 covers_str = True
 
         for base in read.sequence_bases:
-            if base.ref_pos in hsnp_info[chrom]:
+            if base.ref_pos == hsnp_info.variant.position:
                 is_any_hsnp_base = True
-                hsnp_alleles = hsnp_info[chrom][base.ref_pos]
+                hsnp_alleles = (hsnp_info.variant.reference_base, hsnp_info.variant.alternate_base)
                 is_hsnp_allele = base.base in hsnp_alleles
                 base.add_attribute('snp', {
                     'is_snp': True,
@@ -111,13 +113,13 @@ def hsnp_processor(hsnp_info: Dict[str, Dict[int, Tuple[str, str]]], target_regi
 
 # processor for classify_allelic_reads
 class ClassifyAllelicReadsInput:
-    def __init__(self, str_data, row_data, region, sample_type='SCC', flanking_seq_length=5, individual_code='1'):
+    def __init__(self, str_data, region, sample_type='SCC', flanking_seq_length=5, individual_code='1'):
         self.str_data = str_data
-        self.row_data = row_data
+        self.region = region
         self.sample_type = sample_type
         self.flanking_seq_length = flanking_seq_length
         self.individual_code = individual_code
-        self.is_heterozygous = not row_data[f'is_germ_hom_{individual_code}'].iloc[0] 
+        self.is_heterozygous = not region.additional_info[f'is_germ_hom_{individual_code}']
         self.pro_type = self._get_pro_type()
         self.str_unit_length = region['str_unit_length']
         self.stutter = self._build_stutter()
@@ -134,17 +136,17 @@ class ClassifyAllelicReadsInput:
         stutter = {}
         for stype in stutter_types:
             stutter[stype] = {
-                f"rho_{stype}_in": float(self.row_data[f"rho_{stype}_in_{self.individual_code}"].iloc[0]),
-                f"up_{stype}_in": float(self.row_data[f"up_{stype}_in_{self.individual_code}"].iloc[0]),
-                f"down_{stype}_in": float(self.row_data[f"down_{stype}_in_{self.individual_code}"].iloc[0]),
-                f"rho_{stype}_out": float(self.row_data[f"rho_{stype}_out_{self.individual_code}"].iloc[0]),
-                f"up_{stype}_out": float(self.row_data[f"up_{stype}_out_{self.individual_code}"].iloc[0]),
-                f"down_{stype}_out": float(self.row_data[f"down_{stype}_out_{self.individual_code}"].iloc[0]),
+                f"rho_{stype}_in": float(self.region.additional_info[f"rho_{stype}_in_{self.individual_code}"]),
+                f"up_{stype}_in": float(self.region.additional_info[f"up_{stype}_in_{self.individual_code}"]),
+                f"down_{stype}_in": float(self.region.additional_info[f"down_{stype}_in_{self.individual_code}"]),
+                f"rho_{stype}_out": float(self.region.additional_info[f"rho_{stype}_out_{self.individual_code}"]),
+                f"up_{stype}_out": float(self.region.additional_info[f"up_{stype}_out_{self.individual_code}"]),
+                f"down_{stype}_out": float(self.region.additional_info[f"down_{stype}_out_{self.individual_code}"]),
             }
         return stutter
 
     def _parse_mu_mosaic(self):
-        mu_mosaic = eval(self.row_data[f'mu_mosaic_{self.individual_code}'].iloc[0])
+        mu_mosaic = eval(self.region.additional_info[f'mu_mosaic_{self.individual_code}'])
         # print(mu_mosaic)
         return mu_mosaic[0], mu_mosaic[1], mu_mosaic[5]
 
@@ -195,12 +197,13 @@ class ClassifyAllelicReadsInput:
             'is_heterozygous': self.is_heterozygous
         }
 
-def classify_allelic_reads_processor(str_info_dict: Dict[str, Dict[str, Any]], row_data: Dict[str, Any], region: Dict[str, Any], sample_type: str = 'SCC', flanking_seq_length: int = 5, individual_code: str = '1'):
+def classify_allelic_reads_processor(str_info_dict: Dict[str, Dict[str, Any]], region: STRRegion, sample_type: str = 'SCC', flanking_seq_length: int = 5, individual_code: str = '1'):
     def process(read: CombinedReadInfo):
         read_key = f"{read.query_name}_{read.reference_start}"
         str_info = str_info_dict.get(read_key)
         if str_info:
-            input_data = ClassifyAllelicReadsInput(str_info, row_data, region, sample_type, flanking_seq_length, individual_code)
+            input_data = ClassifyAllelicReadsInput(str_info, region, sample_type, flanking_seq_length, individual_code)
+            # print(input_data.get_classify_allelic_reads_args())
             result = classify_allelic_reads(**input_data.get_classify_allelic_reads_args())
             read.add_attribute('classify_allelic_reads', result)
     return process
