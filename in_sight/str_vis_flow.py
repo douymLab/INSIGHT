@@ -15,6 +15,8 @@ import traceback
 from typing import Optional
 import pysam
 from in_sight.str_utils import STRRegion
+import pandas as pd
+import ast
 
 def run_r_visualization(base_df_path, read_df_path, reference_df_path, output_file="output.svg", 
                        mut_start=None, mut_end=None, mut_type=None, start_axis=None,
@@ -236,16 +238,41 @@ def str_visulization(bam_path: str,
     
     # 执行可视化
     if run_visualization and file_paths:
-        # 根据参数决定使用哪个区域的坐标
-        if mutation_region_label is not None:
-            # 查找指定标签的区域
-            target_regions = [r for r in parsed_regions if r[2] == mutation_region_label]
-            if not target_regions:
-                raise ValueError(f"Region with label '{mutation_region_label}' not found")
-            # 使用指定标签的区域坐标
-            mut_start = target_regions[0][0]
-            mut_end = target_regions[0][1]
-            print(f"Using mutation region with label '{mutation_region_label}': {mut_start}-{mut_end}")
+        
+        # 从 kwargs 中提取可能的可视化参数
+        for key in ['mut_type', 'start_axis']:
+            if key in kwargs:
+                vis_kwargs[key] = kwargs[key]
+
+        if str_region_info is not None:
+            # Safely get mutation information
+            mut_refalt_col = f'mut_refalt_{individual_code}'
+            mut_info_col = f'mut_info_{individual_code}'
+            additional_info_keys = str_region_info.additional_info.keys()
+
+            if mut_refalt_col in additional_info_keys:
+                mut_refalt = str_region_info.additional_info[mut_refalt_col]
+                if pd.notna(mut_refalt) and mut_refalt != 'None':
+                    try:
+                        mut_refalt = ast.literal_eval(str(mut_refalt))
+                        mut_start = mut_refalt[1]
+                        if int(mut_start) is not None:
+                            mut_start = int(mut_start) + 1
+                        mut_end = mut_refalt[2]
+                        if int(mut_end) is not None:
+                            mut_end = int(mut_end) + 1
+                    except (ValueError, SyntaxError, IndexError) as e:
+                        logging.warning(f"Could not parse mut_refalt for {str_id}: {e}")
+                        
+            if mut_info_col in additional_info_keys:
+                mut_info = str_region_info.additional_info[mut_info_col]
+                if pd.notna(mut_info) and mut_info != 'None':
+                    try:
+                        mut_info = ast.literal_eval(str(mut_info))
+                        mut_type = mut_info[2] if len(mut_info) > 2 else None
+                    except (ValueError, SyntaxError, IndexError) as e:
+                        logging.warning(f"Could not parse mut_info for {str_id}: {e}")
+            print(f"Using mutation region with label '{mut_type}': {mut_start}-{mut_end}")
         else:
             # 使用所有区域的范围（默认行为）
             mut_start = min(region[0] for region in parsed_regions)
@@ -264,11 +291,6 @@ def str_visulization(bam_path: str,
             'r_script_path': r_script_path,
             'start_axis': start_axis
         }
-        
-        # 从 kwargs 中提取可能的可视化参数
-        for key in ['mut_type', 'start_axis']:
-            if key in kwargs:
-                vis_kwargs[key] = kwargs[key]
                 
         run_r_visualization(**vis_kwargs)
 

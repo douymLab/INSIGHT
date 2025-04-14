@@ -389,10 +389,22 @@ class EnhancedRead:
         for i, segment in enumerate(segments):
             first_base = next((base for base in segment if base.align_state != AlignState.HARD_CLIPPED), None)
             if first_base and first_base.ref_pos is not None:
+                # Track insertions at each ref_pos to avoid overlapping
+                insertion_counts = {}
+                
                 # 对于每个片段中的碱基，直接使用ref_pos作为visual_x
                 for base in segment:
                     if base.ref_pos is not None:
-                        base.visual_x = base.ref_pos
+                        # 如果是INSERTION碱基，则使用ref_pos+插入索引作为visual_x
+                        if base.align_state == AlignState.INSERTION:
+                            # Initialize counter for this reference position if not exists
+                            if base.ref_pos not in insertion_counts:
+                                insertion_counts[base.ref_pos] = 0
+                            # Increment counter and use it for positioning
+                            insertion_counts[base.ref_pos] += 1
+                            base.visual_x = base.ref_pos + insertion_counts[base.ref_pos]
+                        else:
+                            base.visual_x = base.ref_pos
                     else:
                         # 对于没有ref_pos的碱基（如硬裁剪），使用相对位置
                         base.visual_x = first_base.ref_pos + (base.x - first_base.x)

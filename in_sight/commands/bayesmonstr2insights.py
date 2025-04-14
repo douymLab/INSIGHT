@@ -690,7 +690,7 @@ def generate_html_report(
     report_filename: Optional[str] = None,
     template_file_path: Optional[str] = None
 ) -> str:
-    """Generate HTML report for batch visualization results with database information using AG Grid.
+    """Generate HTML report for batch visualization results with database information using Table.
     
     Args:
         output_dir: Output directory
@@ -799,18 +799,13 @@ def generate_html_report(
         if col not in str_data:
             str_data[col] = "N/A"  # Use N/A as default value for non-existing columns
     
-    # --- Prepare Global Data for AG Grid --- 
-    global_data_rows_grouped = {}
+    # --- Prepare Global Data for Table --- 
     global_data_rows_flat = []
-    for col in global_columns or []:
+    for col in global_columns + sample_columns or []:
         # Get original column name if replacement happened, to fetch metadata
         original_col = col
         if ic_for_replacement and f'{{{ic_for_replacement}}}' in col:
             original_col = col.replace(ic_for_replacement, '{ic}')
-        
-        group = column_groups.get(col, "其他") # Use replaced col name for grouping
-        if group not in global_data_rows_grouped:
-            global_data_rows_grouped[group] = []
         
         row_data = {
             "attribute": col,
@@ -818,14 +813,25 @@ def generate_html_report(
             "description": column_descriptions.get(original_col, ""),
             "metadata": column_metadata.get(original_col, {})
         }
-        global_data_rows_grouped[group].append(row_data)
+
         global_data_rows_flat.append(row_data)
     
-    # --- Prepare Sample-Specific Data for AG Grid --- 
+    # --- Prepare Sample-Specific Data for Table --- 
     sample_data_distributed = {}
     if sample_columns and processed_tasks:
         # Create metadata lookup using the pre-sorted all_metadata_samples list
         metadata_lookup = {}
+        
+        # Check if column_position exists in metadata
+        has_column_position = any('column_position' in sample_meta for sample_meta in all_metadata_samples)
+        # Collect unique position values if column_position exists
+        unique_positions = set()
+        if has_column_position:
+            for sample_meta in all_metadata_samples:
+                if 'column_position' in sample_meta and sample_meta['column_position']:
+                    unique_positions.add(sample_meta['column_position'])
+            logging.info(f"Found {len(unique_positions)} unique column positions in metadata")
+        
         for i, sample_meta in enumerate(all_metadata_samples):
             key = (sample_meta.get('individual_code', ''), sample_meta.get('sample_name', ''))
             # Use the index from the potentially sorted list
@@ -840,26 +846,55 @@ def generate_html_report(
             # Parse the value only once
             parsed_value = parse_complex_value(value_from_db)
             
+            # Determine if we need to skip the first sample
+            skip_first_sample = False
+            if isinstance(parsed_value, (list, tuple)):
+                if has_column_position and unique_positions:
+                    # If column_position exists, compare unique positions with parsed_value length
+                    # If there's one more unique position than the length of parsed_value, we need to skip the first
+                    if len(unique_positions) == len(parsed_value) + 1:
+                        skip_first_sample = True
+                        logging.debug(f"Column {col}: Skipping first sample based on column_position count ({len(unique_positions)}) vs data length ({len(parsed_value)})")
+                else:
+                    # Fall back to original logic if column_position not available
+                    if len(parsed_value) < len(all_metadata_samples):
+                        skip_first_sample = True
+                        logging.debug(f"Column {col}: Skipping first sample based on sample count")
+            
             # Distribute based on index
             distributed_for_col = {}
             for i, sample_meta in enumerate(all_metadata_samples):
-                # 特殊处理第一个样本（索引为0），第一个样本的数据不在数据库中
-                if i == 0:
+                # 特殊处理第一个样本（索引为0）- 只有在需要跳过时才进行
+                if i == 0 and skip_first_sample:
                     distributed_for_col[i] = "N/A"
                     continue
-                    
+                
+                # Use column_position for indexing if available
+                if has_column_position and 'column_position' in sample_meta and sample_meta['column_position']:
+                    pos_value = sample_meta['column_position']
+                    try:
+                        # Use position value directly, assuming it's 1-indexed and we subtract 1 for 0-indexed list
+                        pos_index = int(pos_value) - 1
+                        if isinstance(parsed_value, (list, tuple)) and 0 <= pos_index < len(parsed_value):
+                            value = parsed_value[pos_index]
+                            distributed_for_col[i] = value if value is not None and value != '' else "N/A"
+                            continue
+                    except (ValueError, TypeError):
+                        # If position can't be converted to int, fall back to normal indexing
+                        pass
+                
                 # 处理值为None或无效的情况
                 if parsed_value is None:
                     distributed_for_col[i] = "N/A"
                 elif isinstance(parsed_value, (list, tuple)):
-                    # 由于第一个样本特殊，列表的索引需要偏移 -1
-                    list_index = i - 1
+                    # 根据是否跳过第一个样本来决定索引偏移
+                    list_index = i - 1 if skip_first_sample else i
                     if 0 <= list_index < len(parsed_value):
                         # 检查列表中的值是否为None或空
                         if parsed_value[list_index] is None or parsed_value[list_index] == '':
                             distributed_for_col[i] = "N/A"
                         else:
-                            distributed_for_col[i] = parsed_value[list_index] # 使用偏移的索引
+                            distributed_for_col[i] = parsed_value[list_index]
                     else:
                         distributed_for_col[i] = "[Index out of bounds]"
                 else:
@@ -881,12 +916,9 @@ def generate_html_report(
         'generation_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'is_sorted': sort_by, # Use the arg to indicate sorting intention
         'embed_images': embed_images,
-        # Pass AG Grid ready data
-        'global_data_rows_grouped': global_data_rows_grouped,
         'global_data_rows_flat': global_data_rows_flat,
         'tasks': [],
-        'has_sample_data': bool(sample_columns),
-        # Note: Descriptions and metadata are now embedded in row data
+        'has_sample_data': bool(sample_columns)
     }
     
     # Create a lookup for processed task results by (ic, sample_name)
@@ -911,12 +943,12 @@ def generate_html_report(
             'pro_type': processed_task.get('pro_type', sample_meta.get('pro_type', 'N/A')) if processed_task else sample_meta.get('pro_type', 'N/A'),
             'sample_name': sample_name,
             'sort_value': sample_meta.get('sort_value', 'N/A'),
-            # AG Grid ready data for this sample
+            # Table ready data for this sample
             'sample_data_rows_grouped': {},
             'sample_data_rows_flat': []
         }
         
-        # Populate sample-specific AG Grid data for this task using the index 'i'
+        # Populate sample-specific Table data for this task using the index 'i'
         if sample_columns:
             for col in sample_columns:
                 # Get original column name for metadata lookup
@@ -1104,6 +1136,9 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
     # Create a mapping for finding BAM paths when processing skipped tasks
     metadata_info = {}  # Format: {(individual_code, sample_identifier): {"bam_path": path, "pro_type": type}}
     
+    # Store the target individual code once to avoid redundant checks
+    target_individual_code = args.individual_code if hasattr(args, 'individual_code') and args.individual_code else None
+    
     with open(args.metadata_file, 'r') as f:
         # Read first line and manually parse
         header_line = f.readline().strip()
@@ -1132,10 +1167,9 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
             if 'include' in row and row['include'].lower() not in ['1', 'true', 'yes', 'y']:
                 continue
             
-            # Skip rows that don't in current individual_code
-            if hasattr(args, 'individual_code') and args.individual_code:
-                if row[ic_col] != args.individual_code:
-                    continue
+            # Skip rows that don't match the specified individual_code
+            if target_individual_code and row[ic_col] != target_individual_code:
+                continue
                 
             try:
                 individual_code = row[ic_col]
@@ -1226,8 +1260,8 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
                 logging.error(f"Error preparing task: {e}, row content: {row}")
     
     # If a single individual_code is specified, use it to replace all {ic} placeholders
-    if hasattr(args, 'individual_code') and args.individual_code:
-        ic_for_replacement = args.individual_code
+    if target_individual_code:
+        ic_for_replacement = target_individual_code
     # If there is only one individual_code, use it
     elif len(all_individual_codes) == 1:
         ic_for_replacement = list(all_individual_codes)[0]
