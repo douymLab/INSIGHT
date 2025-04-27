@@ -1139,14 +1139,17 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
     # Store the target individual code once to avoid redundant checks
     target_individual_code = args.individual_code if hasattr(args, 'individual_code') and args.individual_code else None
     
-    with open(args.metadata_file, 'r') as f:
-        # Read first line and manually parse
-        header_line = f.readline().strip()
-        headers = [h.strip() for h in header_line.split(',')]
+    with open(args.metadata_file, 'r', newline='') as f: # Use newline='' for csv module
+        # Let csv.DictReader handle the header automatically
+        # It correctly parses quoted fields.
+        reader = csv.DictReader(f, delimiter=',') 
         
-        # Use fixed CSV format to read data rows
-        reader = csv.DictReader(f, fieldnames=headers, delimiter=',')
-        
+        # Get the headers parsed by DictReader
+        headers = reader.fieldnames
+        if not headers:
+             logging.error(f"Could not read headers from metadata file: {args.metadata_file}")
+             sys.exit(1)
+
         # Check if required columns exist
         missing_cols = []
         for col, default_name in [(ic_col, 'individual_code'), (path_col, 'path'), (type_col, 'type')]:
@@ -1158,11 +1161,8 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
             sys.exit(1)
         
         # Process each row, preparing tasks
+        # No need to skip the header row manually anymore
         for row in reader:
-            # Skip first line of CSV file, as it's the header line, and we've already read it
-            if all(key == value for key, value in zip(headers, row.values())):
-                continue
-                
             # Skip rows that don't include
             if 'include' in row and row['include'].lower() not in ['1', 'true', 'yes', 'y']:
                 continue
