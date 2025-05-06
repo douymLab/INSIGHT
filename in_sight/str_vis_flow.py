@@ -2,7 +2,7 @@ import os
 from in_sight.reads_manager import create_combined_read_manager
 from in_sight.utils import parse_region, convert_pdf_to_png, get_memory_usage, HSNPInfo
 from in_sight.utils import get_flanking_sequences, determine_file_type, get_file_mode
-from in_sight.add_attr_info import hsnp_processor, str_data_processor, classify_allelic_reads_processor
+from in_sight.add_attr_info import hsnp_processor, str_data_processor, classify_allelic_reads_processor, str_data_processor_by_str_position
 from in_sight.analysis.hmm_model import StrReads
 from importlib import resources
 import in_sight
@@ -84,6 +84,7 @@ def str_visulization(bam_path: str,
                     mut_type: str = "STR",
                     pro_type: str = None,
                     individual_code: str = None,
+                    str_processor_type: str = 'str_position',
                     **kwargs):
     """
     Perform single base region analysis and generate visualizations
@@ -184,11 +185,19 @@ def str_visulization(bam_path: str,
             manager.add_processor(hsnp_processor(hsnp_info, (str_start, str_end)))
             
     # 增加str_data
+    ## protocol 1, use HMMSegger to get str_data
     if str_region_info is not None and str_id is not None:
         str_region = str_region_info
-        str_id, str_reads = process_single_str_id(str_id, bam_path, reference_fasta, str_region)
-        print(f"Adding STR data processor for region '{str_id}'")
-        manager.add_processor(str_data_processor(str_reads.str_data))
+        if str_processor_type == 'hmms':
+            str_id, str_reads = process_single_str_id(str_id, bam_path, reference_fasta, str_region)
+            print(f"Adding STR data processor for region '{str_id}' by 'hmms'")
+            manager.add_processor(str_data_processor(str_reads.str_data))
+        elif str_processor_type == 'str_position':
+            ## protocol 2, use str position to get str_data
+            print(f"Adding STR data processor for region '{str_id}' by 'str_position'")
+            manager.add_processor(str_data_processor_by_str_position(str_region_info))
+        else:
+            raise Warning(f"Unknown str processor type: {str_processor_type}, use 'hmms' or 'str_position'")
 
     # 增加classify_allelic_reads
     if str_id is not None and str_reads is not None and pro_type is not None and individual_code is not None:

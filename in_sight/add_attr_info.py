@@ -37,6 +37,28 @@ def str_data_processor(str_info_dict: Dict[str, Dict[str, Any]]):
                         break
     return process
 
+# processor for STR data by str position
+def str_data_processor_by_str_position(str_region_info: STRRegion):
+    def process(read: CombinedReadInfo):
+        # Filter reads that do not sufficiently span the STR region based on reference coordinates
+        if not (
+            read.reference_start is not None
+            and read.reference_end is not None
+            and read.reference_start <= str_region_info.start - 12  # region_start - 11 - 1
+            and read.reference_end >= str_region_info.end + 10
+        ):
+            return  # Skip processing this read if it doesn't meet the criteria
+        str_index = 0
+        str_start, str_end = str_region_info.start, str_region_info.end
+        for base in read.sequence_bases:
+            if base.query_pos is not None and str_start <= base.query_pos <= str_end:
+                base.add_attribute('str.is_str', True)
+                base.add_attribute('str.position', str_index)
+                str_index += 1
+            elif base.query_pos is not None and base.query_pos >= str_end:
+                break
+    return process
+
 # processor for HSNP data
 def hsnp_processor(hsnp_info: HSNPInfo, target_region: Tuple[int, int]):
     paired_reads: Dict[str, List[CombinedReadInfo]] = {}
