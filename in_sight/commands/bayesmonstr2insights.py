@@ -688,7 +688,8 @@ def generate_html_report(
     column_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     ic_for_replacement: Optional[str] = None,
     report_filename: Optional[str] = None,
-    template_file_path: Optional[str] = None
+    template_file_path: Optional[str] = None,
+    exclude_sample_by: Optional[str] = None
 ) -> str:
     """Generate HTML report for batch visualization results with database information using Table.
     
@@ -710,6 +711,7 @@ def generate_html_report(
         ic_for_replacement: Individual code to replace {ic} in column names
         report_filename: Optional filename for the HTML report. If None, defaults to {str_id}_report.html.
         template_file_path: Optional path to a custom Jinja2 template file.
+        exclude_sample_by: Column name in metadata file to exclude samples if value is TRUE (case-insensitive)
         
     Returns:
         HTML file path
@@ -819,91 +821,49 @@ def generate_html_report(
     # --- Prepare Sample-Specific Data for Table --- 
     sample_data_distributed = {}
     if sample_columns and processed_tasks:
-        # Create metadata lookup using the pre-sorted all_metadata_samples list
-        metadata_lookup = {}
-        
-        # Check if column_position exists in metadata
-        has_column_position = any('column_position' in sample_meta for sample_meta in all_metadata_samples)
-        # Collect unique position values if column_position exists
-        unique_positions = set()
-        if has_column_position:
-            for sample_meta in all_metadata_samples:
-                if 'column_position' in sample_meta and sample_meta['column_position']:
-                    unique_positions.add(sample_meta['column_position'])
-            logging.info(f"Found {len(unique_positions)} unique column positions in metadata")
-        
-        for i, sample_meta in enumerate(all_metadata_samples):
-            key = (sample_meta.get('individual_code', ''), sample_meta.get('sample_name', ''))
-            # Use the index from the potentially sorted list
-            metadata_lookup[key] = { 'index': i } 
-            # Add other metadata if needed for index_column logic (though index is preferred now)
-            if index_column and index_column in sample_meta:
-                metadata_lookup[key][index_column] = sample_meta[index_column]
-               
-        # Distribute each sample column's value based on index
+        # 给未被 exclude 的样本分配 valid_index
+        valid_index = 0
+        n_valid = 0
+        for sample in all_metadata_samples:
+            if not sample.get('excluded', False):
+                sample['valid_index'] = valid_index
+                valid_index += 1
+            else:
+                sample['valid_index'] = None
+        n_valid = valid_index
         for col in sample_columns:
             value_from_db = str_data.get(col, "N/A")
-            # Parse the value only once
             parsed_value = parse_complex_value(value_from_db)
-            
-            # Determine if we need to skip the first sample
+            # 判断是否需要跳过第一个样本
             skip_first_sample = False
             if isinstance(parsed_value, (list, tuple)):
-                if has_column_position and unique_positions:
-                    # If column_position exists, compare unique positions with parsed_value length
-                    # If there's one more unique position than the length of parsed_value, we need to skip the first
-                    if len(unique_positions) == len(parsed_value) + 1:
-                        skip_first_sample = True
-                        logging.debug(f"Column {col}: Skipping first sample based on column_position count ({len(unique_positions)}) vs data length ({len(parsed_value)})")
-                else:
-                    # Fall back to original logic if column_position not available
-                    if len(parsed_value) < len(all_metadata_samples):
-                        skip_first_sample = True
-                        logging.debug(f"Column {col}: Skipping first sample based on sample count")
-            
-            # Distribute based on index
+                if len(parsed_value) == n_valid - 1:
+                    skip_first_sample = True
             distributed_for_col = {}
             for i, sample_meta in enumerate(all_metadata_samples):
-                # 特殊处理第一个样本（索引为0）- 只有在需要跳过时才进行
-                if i == 0 and skip_first_sample:
+                if sample_meta.get('excluded', False):
                     distributed_for_col[i] = "N/A"
                     continue
-                
-                # Use column_position for indexing if available
-                if has_column_position and 'column_position' in sample_meta and sample_meta['column_position']:
-                    pos_value = sample_meta['column_position']
-                    try:
-                        # Use position value directly, assuming it's 1-indexed and we subtract 1 for 0-indexed list
-                        pos_index = int(pos_value) - 1
-                        if isinstance(parsed_value, (list, tuple)) and 0 <= pos_index < len(parsed_value):
-                            value = parsed_value[pos_index]
-                            distributed_for_col[i] = value if value is not None and value != '' else "N/A"
-                            continue
-                    except (ValueError, TypeError):
-                        # If position can't be converted to int, fall back to normal indexing
-                        pass
-                
-                # 处理值为None或无效的情况
+                valid_index = sample_meta['valid_index']
                 if parsed_value is None:
                     distributed_for_col[i] = "N/A"
                 elif isinstance(parsed_value, (list, tuple)):
-                    # 根据是否跳过第一个样本来决定索引偏移
-                    list_index = i - 1 if skip_first_sample else i
-                    if 0 <= list_index < len(parsed_value):
-                        # 检查列表中的值是否为None或空
-                        if parsed_value[list_index] is None or parsed_value[list_index] == '':
+                    if skip_first_sample:
+                        if valid_index == 0:
                             distributed_for_col[i] = "N/A"
+                        elif 0 <= valid_index - 1 < len(parsed_value):
+                            v = parsed_value[valid_index - 1]
+                            distributed_for_col[i] = v if v is not None and v != '' else "N/A"
                         else:
-                            distributed_for_col[i] = parsed_value[list_index]
+                            distributed_for_col[i] = "[Index out of bounds]"
                     else:
-                        distributed_for_col[i] = "[Index out of bounds]"
+                        if 0 <= valid_index < len(parsed_value):
+                            v = parsed_value[valid_index]
+                            distributed_for_col[i] = v if v is not None and v != '' else "N/A"
+                        else:
+                            distributed_for_col[i] = "[Index out of bounds]"
                 else:
-                    # 检查值是否为空字符串
-                    if parsed_value == '':
-                        distributed_for_col[i] = "N/A"
-                    else:
-                        distributed_for_col[i] = parsed_value # Repeat non-sequence value
-                   
+                    distributed_for_col[i] = parsed_value
             sample_data_distributed[col] = distributed_for_col
     
     print(f"sample_data_distributed: {sample_data_distributed}")
@@ -936,6 +896,9 @@ def generate_html_report(
         # Find corresponding processed task result or use metadata
         processed_task = processed_lookup.get(key) 
         
+        excluded = sample_meta.get('excluded', False)
+        excluded_reason = sample_meta.get('excluded_reason', None)
+        
         task_data = {
             'status': processed_task.get('status', 'missing') if processed_task else sample_meta.get('status', 'missing'),
             'individual_code': ic,
@@ -943,13 +906,15 @@ def generate_html_report(
             'pro_type': processed_task.get('pro_type', sample_meta.get('pro_type', 'N/A')) if processed_task else sample_meta.get('pro_type', 'N/A'),
             'sample_name': sample_name,
             'sort_value': sample_meta.get('sort_value', 'N/A'),
+            'excluded': excluded,
+            'excluded_reason': excluded_reason,
             # Table ready data for this sample
             'sample_data_rows_grouped': {},
             'sample_data_rows_flat': []
         }
         
         # Populate sample-specific Table data for this task using the index 'i'
-        if sample_columns:
+        if sample_columns and not excluded:
             for col in sample_columns:
                 # Get original column name for metadata lookup
                 original_col = col
@@ -1049,6 +1014,15 @@ def generate_html_report(
         
         # 添加全局数据标志，便于模板中检查
         template_data['global_data'] = len(template_data.get('global_data_rows_flat', [])) > 0
+        
+        # --- 新增：保存 task_data 到 debug 文件 ---
+        try:
+            debug_dir = output_dir if output_dir != '-' else '.'
+            debug_file = os.path.join(debug_dir, 'task_data_debug.jsonl')
+            with open(debug_file, 'a', encoding='utf-8') as f_debug:
+                f_debug.write(json.dumps(task_data, ensure_ascii=False) + '\n')
+        except Exception as e:
+            logging.warning(f"写入 task_data_debug.jsonl 失败: {e}")
     
         # Render the template
         html_content = template.render(**template_data)
@@ -1139,6 +1113,11 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
     # Store the target individual code once to avoid redundant checks
     target_individual_code = args.individual_code if hasattr(args, 'individual_code') and args.individual_code else None
     
+    exclude_sample_by = getattr(args, 'exclude_sample_by', None)
+    remove_sample_by = getattr(args, 'remove_sample_by', None)
+    
+    excluded_samples = set()
+    
     with open(args.metadata_file, 'r', newline='') as f: # Use newline='' for csv module
         # Let csv.DictReader handle the header automatically
         # It correctly parses quoted fields.
@@ -1163,64 +1142,58 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
         # Process each row, preparing tasks
         # No need to skip the header row manually anymore
         for row in reader:
+            # Remove by column if specified
+            if remove_sample_by and remove_sample_by in row and row[remove_sample_by].strip().lower() != 'true':
+                continue
             # Skip rows that don't include
             if 'include' in row and row['include'].lower() not in ['1', 'true', 'yes', 'y']:
                 continue
-            
             # Skip rows that don't match the specified individual_code
             if target_individual_code and row[ic_col] != target_individual_code:
                 continue
-                
+            # Exclude by column if specified
+            excluded_reason = None
+            if exclude_sample_by and exclude_sample_by in row and row[exclude_sample_by].strip().lower() == 'true':
+                excluded_samples.add((row[ic_col], row[args.sample_name] if args.sample_name and args.sample_name in row else os.path.basename(row[path_col]).replace('.bam', '').replace('.cram', '')))
+                excluded_reason = f"{exclude_sample_by}=TRUE"
             try:
                 individual_code = row[ic_col]
                 bam_path = row[path_col]
                 pro_type = row[type_col]
-                
                 # Add individual ID to set for replacing {ic} placeholder
                 all_individual_codes.add(individual_code)
-                
                 # Check if BAM file exists
                 if not check_file_exists(bam_path):
                     logging.error(f"BAM file does not exist: {bam_path}, skipping this sample")
                     continue
-                
                 # Build output prefix and file path
-                # Use sample_name parameter specified column as sample name, if not specified use BAM file name
                 if args.sample_name and args.sample_name in row:
                     sample_identifier = row[args.sample_name]
                 elif 'sn' in column_map and column_map['sn'] in row:
                     sample_identifier = row[column_map['sn']]
                 else:
-                    # Default behavior: extract file name from BAM path
                     sample_identifier = os.path.basename(bam_path).replace('.bam', '').replace('.cram', '')
-                
                 # Store metadata information in mapping for later lookup
                 metadata_info[(individual_code, sample_identifier)] = {
                     "bam_path": bam_path,
                     "pro_type": pro_type
                 }
-                
-                # If sort column is specified, add sort value
                 if args.sort_by and args.sort_by in row:
                     try:
                         sort_value = float(row[args.sort_by])
                         metadata_info[(individual_code, sample_identifier)]["sort_value"] = sort_value
                     except (ValueError, TypeError):
                         logging.warning(f"Sort column {args.sort_by} value '{row[args.sort_by]}' is not a valid number, using default sorting")
-                
+                # 标记排除原因
+                if excluded_reason:
+                    metadata_info[(individual_code, sample_identifier)]["excluded"] = True
+                    metadata_info[(individual_code, sample_identifier)]["excluded_reason"] = excluded_reason
                 prefix = f"{pro_type}_{individual_code}_{sample_identifier}"
-                
-                # Check if output file already exists (usually PNG image)
                 output_file = os.path.join(args.output_dir, f"{prefix}.png")
                 task_id = f"{args.str_id}_{individual_code}_{sample_identifier}"
-                
-                # If task already exists, skip
                 if task_id in task_identifiers:
                     continue
-                
                 task_identifiers.add(task_id)
-                
-                # If file already exists and not forced to regenerate, skip this task
                 if os.path.exists(output_file) and not args.force:
                     logging.debug(f"Skipping existing output file: {output_file}")
                     all_tasks.append((None, {
@@ -1230,8 +1203,6 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
                         'file': output_file
                     }))
                     continue
-                
-                # Prepare task parameters
                 task_args = {
                     'bm_res_database': args.bm_res_database,
                     'bam_path': bam_path,
@@ -1243,7 +1214,6 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
                     'output_dir': args.output_dir,
                     'prefix': prefix
                 }
-                
                 task_info = {
                     'str_id': args.str_id,
                     'individual_code': individual_code,
@@ -1251,11 +1221,9 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
                     'prefix': prefix,
                     'pro_type': pro_type,
                     'sample_name': sample_identifier,
-                    'output_file': output_file  # Add expected output file path, regardless of whether the file has been generated
+                    'output_file': output_file
                 }
-                
                 all_tasks.append((task_args, task_info))
-                
             except Exception as e:
                 logging.error(f"Error preparing task: {e}, row content: {row}")
     
@@ -1471,9 +1439,11 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
                                 'sample_name': sample_name,
                                 'bam_path': info.get('bam_path', 'Unknown'),
                                 'pro_type': info.get('pro_type', 'Unknown'),
-                                'sort_value': float('inf'),
+                                'sort_value': info.get('sort_value', float('inf')),
                                 'status': 'missing',
-                                'index': i # Assign index based on original order
+                                'index': i,
+                                'excluded': info.get('excluded', False),
+                                'excluded_reason': info.get('excluded_reason', None)
                             }
                             all_metadata_samples.append(sample_info)
                         
@@ -1506,7 +1476,8 @@ def visualize_batch_str(args: argparse.Namespace) -> None:
                         column_metadata=column_metadata,
                         ic_for_replacement=ic_for_replacement,
                         report_filename=args.report_name,
-                        template_file_path=args.template_file
+                        template_file_path=args.template_file,
+                        exclude_sample_by=exclude_sample_by
                     )
                     logging.info(f"HTML report generated: {html_file}")
                 except Exception as e:
@@ -1591,6 +1562,10 @@ def main():
                              help='Specify the filename for the HTML report (e.g., my_report.html)')
     batch_parser.add_argument('--template-file',
                              help='Path to a custom Jinja2 template file for the HTML report')
+    batch_parser.add_argument('--exclude-sample-by', '-es',
+                             help='Column name in metadata file to exclude samples if value is TRUE (case-insensitive)')
+    batch_parser.add_argument('--remove-sample-by', '-rs',
+                             help='Column name in metadata file to keep only samples where value is TRUE (case-insensitive)')
     batch_parser.set_defaults(func=visualize_batch_str)
     
     # Parse arguments
