@@ -110,6 +110,7 @@ def str_visulization(bam_path: str,
         mut_type: Type of the mutation (default "STR")
         pro_type: Type of the sample (default None)
         individual_code: Individual code (default None)
+        str_processor_type: Type of the str processor (default 'str_position')
         **kwargs: Additional parameters passed to sampler or read manager
     Returns:
         Dictionary containing generated DataFrames and file paths
@@ -192,17 +193,16 @@ def str_visulization(bam_path: str,
             str_id, str_reads = process_single_str_id(str_id, bam_path, reference_fasta, str_region)
             print(f"Adding STR data processor for region '{str_id}' by 'hmms'")
             manager.add_processor(str_data_processor(str_reads.str_data))
+            # 增加classify_allelic_reads
+            if str_id is not None and str_reads is not None and pro_type is not None and individual_code is not None:
+                print(f"Adding classify_allelic_reads processor for region '{str_id}'")
+                manager.add_processor(classify_allelic_reads_processor(str_reads.str_data, str_region_info, pro_type, individual_code = individual_code))
         elif str_processor_type == 'str_position':
             ## protocol 2, use str position to get str_data
             print(f"Adding STR data processor for region '{str_id}' by 'str_position'")
             manager.add_processor(str_data_processor_by_str_position(str_region_info))
         else:
             raise Warning(f"Unknown str processor type: {str_processor_type}, use 'hmms' or 'str_position'")
-
-    # 增加classify_allelic_reads
-    if str_id is not None and str_reads is not None and pro_type is not None and individual_code is not None:
-        print(f"Adding classify_allelic_reads processor for region '{str_id}'")
-        manager.add_processor(classify_allelic_reads_processor(str_reads.str_data, str_region_info, pro_type, individual_code = individual_code))
     
     manager.process_reads()
     

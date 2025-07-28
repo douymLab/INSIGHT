@@ -543,6 +543,11 @@
                     {% if ns.has_mut_prob_1 %}style="color: {{ highlight_color|default('red') }};"{% endif %}>
                     {{ task.individual_code }}_{{ task.sample_name }}
                 </h3>
+                {% if task.excluded %}
+                    <div style="color: orange; font-weight: bold; margin-bottom: 8px;">
+                        Excluded Sample{% if task.excluded_reason %} (Reason: {{ task.excluded_reason }}){% endif %}
+                    </div>
+                {% endif %}
                     {% if task.status == 'missing' %}
                     <div class="missing-image">
                         <div>
